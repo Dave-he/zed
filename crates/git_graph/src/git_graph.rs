@@ -1,4 +1,5 @@
 use collections::{BTreeMap, HashMap};
+use editor::{Editor, EditorElement, EditorStyle};
 use feature_flags::{FeatureFlagAppExt as _, GitGraphFeatureFlag};
 use git::{
     BuildCommitPermalinkParams, GitHostingProviderRegistry, GitRemote, Oid, ParsedGitRemote,
@@ -195,6 +196,11 @@ impl ChangedFileEntry {
             )
             .into_any_element()
     }
+}
+
+struct SearchState {
+    regex_enabled: bool,
+    editor: Entity<Editor>,
 }
 
 pub struct SplitState {
@@ -835,6 +841,7 @@ fn compute_diff_stats(diff: &CommitDiff) -> (usize, usize) {
 
 pub struct GitGraph {
     focus_handle: FocusHandle,
+    search: SearchState,
     graph_data: GraphData,
     project: Entity<Project>,
     workspace: WeakEntity<Workspace>,
@@ -914,6 +921,12 @@ impl GitGraph {
             .active_repository(cx)
             .map(|repo| repo.read(cx).id);
 
+        let search_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("Search commits...", window, cx);
+            editor
+        });
+
         let table_interaction_state = cx.new(|cx| TableInteractionState::new(cx));
         let table_column_widths = cx.new(|cx| TableColumnWidths::new(4, cx));
         let mut row_height = Self::row_height(cx);
@@ -933,6 +946,10 @@ impl GitGraph {
 
         let mut this = GitGraph {
             focus_handle,
+            search: SearchState {
+                regex_enabled: false,
+                editor: search_editor,
+            },
             project,
             workspace,
             graph_data: graph,
@@ -1303,6 +1320,129 @@ impl GitGraph {
             owner: parsed.owner.into(),
             repo: parsed.repo.into(),
         })
+    }
+
+    fn render_search_input(&self, cx: &App) -> impl IntoElement {
+        let settings = ThemeSettings::get_global(cx);
+        let text_style = gpui::TextStyle {
+            color: if self.search.editor.read(cx).read_only(cx) {
+                cx.theme().colors().text_disabled
+            } else {
+                cx.theme().colors().text
+            },
+            font_family: settings.buffer_font.family.clone(),
+            font_features: settings.buffer_font.features.clone(),
+            font_fallbacks: settings.buffer_font.fallbacks.clone(),
+            font_size: rems(0.875).into(),
+            font_weight: settings.buffer_font.weight,
+            line_height: relative(1.3),
+            ..gpui::TextStyle::default()
+        };
+
+        EditorElement::new(
+            &self.search.editor,
+            EditorStyle {
+                background: cx.theme().colors().toolbar_background,
+                local_player: cx.theme().players().local(),
+                text: text_style,
+                ..EditorStyle::default()
+            },
+        )
+    }
+
+    fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme_colors = cx.theme().colors();
+        let query_focus_handle = self.search.editor.focus_handle(cx);
+
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .p_2()
+            .border_b_1()
+            .border_color(theme_colors.border)
+            .child(
+                h_flex()
+                    .h_8()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .pl_2()
+                    .pr_1()
+                    .gap_2()
+                    .border_1()
+                    .border_color(theme_colors.border)
+                    .rounded_md()
+                    .bg(theme_colors.toolbar_background)
+                    .child(Icon::new(IconName::MagnifyingGlass).color(Color::Muted))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(self.render_search_input(cx)),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                IconButton::new("git-graph-search-regex", IconName::Regex)
+                                    .style(ButtonStyle::Subtle)
+                                    .shape(ui::IconButtonShape::Square)
+                                    .icon_size(IconSize::Small)
+                                    .toggle_state(self.search.regex_enabled)
+                                    .tooltip(Tooltip::text("Use Regular Expressions"))
+                                    .on_click({
+                                        let query_focus_handle = query_focus_handle.clone();
+                                        cx.listener(move |this, _, window, cx| {
+                                            if !query_focus_handle.is_focused(window) {
+                                                window.focus(&query_focus_handle, cx);
+                                            }
+                                            this.search.regex_enabled = !this.search.regex_enabled;
+                                            cx.notify();
+                                        })
+                                    }),
+                            )
+                            .child(
+                                h_flex()
+                                    .ml_1()
+                                    .pl_1p5()
+                                    .items_center()
+                                    .gap_1()
+                                    .border_l_1()
+                                    .border_color(theme_colors.border_variant)
+                                    .child(
+                                        IconButton::new(
+                                            "git-graph-search-prev",
+                                            IconName::ChevronLeft,
+                                        )
+                                        .style(ButtonStyle::Subtle)
+                                        .shape(ui::IconButtonShape::Square)
+                                        .icon_size(IconSize::Small)
+                                        .disabled(true),
+                                    )
+                                    .child(
+                                        IconButton::new(
+                                            "git-graph-search-next",
+                                            IconName::ChevronRight,
+                                        )
+                                        .style(ButtonStyle::Subtle)
+                                        .shape(ui::IconButtonShape::Square)
+                                        .icon_size(IconSize::Small)
+                                        .disabled(true),
+                                    )
+                                    .child(
+                                        div().ml_2().min_w(px(40.)).child(
+                                            Label::new("0/0")
+                                                .size(LabelSize::Small)
+                                                .color(Color::Disabled),
+                                        ),
+                                    ),
+                            ),
+                    ),
+            )
     }
 
     fn render_loading_spinner(&self, cx: &App) -> AnyElement {
@@ -2263,7 +2403,12 @@ impl Render for GitGraph {
             .on_action(cx.listener(Self::select_prev))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::confirm))
-            .child(content)
+            .child(
+                v_flex()
+                    .size_full()
+                    .child(self.render_search_bar(cx))
+                    .child(div().flex_1().child(content)),
+            )
             .children(self.context_menu.as_ref().map(|(menu, position, _)| {
                 deferred(
                     anchored()
