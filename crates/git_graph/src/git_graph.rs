@@ -1,5 +1,5 @@
 use collections::{BTreeMap, HashMap};
-use editor::{Editor, EditorElement, EditorEvent, EditorStyle};
+use editor::{Editor, EditorElement, EditorStyle};
 use feature_flags::{FeatureFlagAppExt as _, GitGraphFeatureFlag};
 use git::{
     BuildCommitPermalinkParams, GitHostingProviderRegistry, GitRemote, Oid, ParsedGitRemote,
@@ -757,7 +757,7 @@ pub fn init(cx: &mut App) {
                                     let existing = workspace.items_of_type::<GitGraph>(cx).next();
                                     if let Some(existing) = existing {
                                         existing.update(cx, |graph, cx| {
-                                            graph.select_commit_by_sha(&sha, cx);
+                                            graph.select_commit_by_sha(sha.as_str(), cx);
                                         });
                                         workspace.activate_item(&existing, true, true, window, cx);
                                         return;
@@ -768,7 +768,7 @@ pub fn init(cx: &mut App) {
                                     let git_graph = cx.new(|cx| {
                                         let mut graph =
                                             GitGraph::new(project, workspace_handle, window, cx);
-                                        graph.select_commit_by_sha(&sha, cx);
+                                        graph.select_commit_by_sha(sha.as_str(), cx);
                                         graph
                                     });
                                     workspace.add_item_to_active_pane(
@@ -1008,7 +1008,7 @@ impl GitGraph {
                                     .and_then(|data| data.commit_oid_to_index.get(&oid).copied())
                             })
                         {
-                            self.select_entry(pending_sha_index, cx);
+                            self.select_entry(pending_sha_index, ScrollStrategy::Nearest, cx);
                         }
                     }
                     GitGraphEvent::LoadingError => {
@@ -1044,7 +1044,7 @@ impl GitGraph {
                                 pending_sha_index
                             })
                         {
-                            self.select_entry(pending_selection_index, cx);
+                            self.select_entry(pending_selection_index, ScrollStrategy::Nearest, cx);
                             self.pending_select_sha.take();
                         }
 
@@ -1200,12 +1200,16 @@ impl GitGraph {
     }
 
     fn select_first(&mut self, _: &SelectFirst, _window: &mut Window, cx: &mut Context<Self>) {
-        self.select_entry(0, cx);
+        self.select_entry(0, ScrollStrategy::Nearest, cx);
     }
 
     fn select_prev(&mut self, _: &SelectPrevious, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(selected_entry_idx) = &self.selected_entry_idx {
-            self.select_entry(selected_entry_idx.saturating_sub(1), cx);
+            self.select_entry(
+                selected_entry_idx.saturating_sub(1),
+                ScrollStrategy::Nearest,
+                cx,
+            );
         } else {
             self.select_first(&SelectFirst, window, cx);
         }
@@ -1217,6 +1221,7 @@ impl GitGraph {
                 selected_entry_idx
                     .saturating_add(1)
                     .min(self.graph_data.commits.len().saturating_sub(1)),
+                ScrollStrategy::Nearest,
                 cx,
             );
         } else {
@@ -1225,7 +1230,11 @@ impl GitGraph {
     }
 
     fn select_last(&mut self, _: &SelectLast, _window: &mut Window, cx: &mut Context<Self>) {
-        self.select_entry(self.graph_data.commits.len().saturating_sub(1), cx);
+        self.select_entry(
+            self.graph_data.commits.len().saturating_sub(1),
+            ScrollStrategy::Nearest,
+            cx,
+        );
     }
 
     fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
@@ -1267,7 +1276,12 @@ impl GitGraph {
         .detach();
     }
 
-    fn select_entry(&mut self, idx: usize, cx: &mut Context<Self>) {
+    fn select_entry(
+        &mut self,
+        idx: usize,
+        scroll_strategy: ScrollStrategy,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_entry_idx == Some(idx) {
             return;
         }
@@ -1278,9 +1292,7 @@ impl GitGraph {
         self.changed_files_scroll_handle
             .scroll_to_item(0, ScrollStrategy::Top);
         self.table_interaction_state.update(cx, |state, cx| {
-            state
-                .scroll_handle
-                .scroll_to_item(idx, ScrollStrategy::Nearest);
+            state.scroll_handle.scroll_to_item(idx, scroll_strategy);
             cx.notify();
         });
 
@@ -1311,25 +1323,27 @@ impl GitGraph {
         cx.notify();
     }
 
-    pub fn select_commit_by_sha(&mut self, sha: &str, cx: &mut Context<Self>) {
-        let Ok(oid) = sha.parse::<Oid>() else {
-            return;
-        };
+    pub fn select_commit_by_sha(&mut self, sha: impl TryInto<Oid>, cx: &mut Context<Self>) {
+        fn inner(this: &mut GitGraph, oid: Oid, cx: &mut Context<GitGraph>) {
+            let Some(selected_repository) = this.get_selected_repository(cx) else {
+                return;
+            };
 
-        let Some(selected_repository) = self.get_selected_repository(cx) else {
-            return;
-        };
+            let Some(index) = selected_repository
+                .read(cx)
+                .get_graph_data(this.log_source.clone(), this.log_order)
+                .and_then(|data| data.commit_oid_to_index.get(&oid))
+                .copied()
+            else {
+                return;
+            };
 
-        let Some(index) = selected_repository
-            .read(cx)
-            .get_graph_data(self.log_source.clone(), self.log_order)
-            .and_then(|data| data.commit_oid_to_index.get(&oid))
-            .copied()
-        else {
-            return;
-        };
+            this.select_entry(index, ScrollStrategy::Center, cx);
+        }
 
-        self.select_entry(index, cx);
+        if let Ok(oid) = sha.try_into() {
+            inner(self, oid, cx);
+        }
     }
 
     fn open_selected_commit_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1504,10 +1518,7 @@ impl GitGraph {
 
                                                         this.search.selected_index =
                                                             Some(prev_selection);
-                                                        this.select_commit_by_sha(
-                                                            &oid.to_string(),
-                                                            cx,
-                                                        );
+                                                        this.select_commit_by_sha(oid, cx);
                                                     },
                                                 ))
                                             },
@@ -1543,10 +1554,7 @@ impl GitGraph {
 
                                                         this.search.selected_index =
                                                             Some(next_selection);
-                                                        this.select_commit_by_sha(
-                                                            &oid.to_string(),
-                                                            cx,
-                                                        );
+                                                        this.select_commit_by_sha(oid, cx);
                                                     },
                                                 ))
                                             },
@@ -1871,7 +1879,7 @@ impl GitGraph {
                     ),
             )
             .child(Divider::horizontal())
-            .child(div().min_w_0().p_2().child(Label::new(subject)))
+            .child(div().p_2().child(Label::new(subject)))
             .child(Divider::horizontal())
             .child(
                 v_flex()
@@ -2231,7 +2239,7 @@ impl GitGraph {
         cx: &mut Context<Self>,
     ) {
         if let Some(row) = self.row_at_position(event.position().y, cx) {
-            self.select_entry(row, cx);
+            self.select_entry(row, ScrollStrategy::Nearest, cx);
             if event.click_count() >= 2 {
                 self.open_commit_view(row, window, cx);
             }
@@ -2484,7 +2492,7 @@ impl Render for GitGraph {
                                     .on_click(move |event, window, cx| {
                                         let click_count = event.click_count();
                                         weak.update(cx, |this, cx| {
-                                            this.select_entry(index, cx);
+                                            this.select_entry(index, ScrollStrategy::Center, cx);
                                             if click_count >= 2 {
                                                 this.open_commit_view(index, window, cx);
                                             }
