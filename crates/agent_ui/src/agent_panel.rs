@@ -890,6 +890,7 @@ pub struct AgentPanel {
     selected_agent_type: AgentType,
     start_thread_in: StartThreadIn,
     worktree_creation_status: Option<WorktreeCreationStatus>,
+    pending_config_overrides: Vec<(acp::SessionConfigId, acp::SessionConfigValueId)>,
     _thread_view_subscription: Option<Subscription>,
     _active_thread_focus_subscription: Option<Subscription>,
     _worktree_creation_task: Option<Task<()>>,
@@ -1226,6 +1227,7 @@ impl AgentPanel {
             selected_agent_type: AgentType::default(),
             start_thread_in: StartThreadIn::default(),
             worktree_creation_status: None,
+            pending_config_overrides: Vec::new(),
             _thread_view_subscription: None,
             _active_thread_focus_subscription: None,
             _worktree_creation_task: None,
@@ -2215,6 +2217,7 @@ impl AgentPanel {
                     cx.observe_in(server_view, window, |this, server_view, window, cx| {
                         this._thread_view_subscription =
                             Self::subscribe_to_active_thread_view(&server_view, window, cx);
+                        this.apply_pending_config_overrides(cx);
                         cx.emit(AgentPanelEvent::ActiveViewChanged);
                         this.serialize(cx);
                         cx.notify();
@@ -2417,6 +2420,58 @@ impl AgentPanel {
             AgentType::NativeAgent => Some(Agent::NativeAgent),
             AgentType::Custom { name } => Some(Agent::Custom { name: name.clone() }),
             AgentType::TextThread => None,
+        }
+    }
+
+    /// Captures the currently selected config option values (e.g., model,
+    /// permissions mode) from the active thread's ACP session.
+    fn capture_config_overrides(
+        &self,
+        cx: &App,
+    ) -> Vec<(acp::SessionConfigId, acp::SessionConfigValueId)> {
+        let Some(thread_view) = self.as_active_thread_view(cx) else {
+            return Vec::new();
+        };
+        let thread = thread_view.read(cx).thread.read(cx);
+        let connection = thread.connection();
+        let session_id = thread.session_id();
+        let Some(config_provider) = connection.session_config_options(session_id, cx) else {
+            return Vec::new();
+        };
+        config_provider
+            .config_options()
+            .into_iter()
+            .filter_map(|opt| match &opt.kind {
+                acp::SessionConfigKind::Select(select) => {
+                    Some((opt.id.clone(), select.current_value.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Applies any pending config option overrides to the active thread's ACP
+    /// session.  Called once after a new worktree workspace's thread becomes
+    /// ready, then the pending overrides are drained so they are applied only
+    /// once.
+    fn apply_pending_config_overrides(&mut self, cx: &mut Context<Self>) {
+        if self.pending_config_overrides.is_empty() {
+            return;
+        }
+        let Some(thread_view) = self.as_active_thread_view(cx) else {
+            return;
+        };
+        let thread = thread_view.read(cx).thread.read(cx);
+        let connection = thread.connection();
+        let session_id = thread.session_id();
+        let Some(config_provider) = connection.session_config_options(session_id, cx) else {
+            return;
+        };
+        let overrides = std::mem::take(&mut self.pending_config_overrides);
+        for (config_id, value) in overrides {
+            config_provider
+                .set_config_option(config_id, value, cx)
+                .detach();
         }
     }
 
@@ -2889,6 +2944,7 @@ impl AgentPanel {
             .downcast::<workspace::MultiWorkspace>();
 
         let selected_agent = self.selected_agent();
+        let config_overrides = self.capture_config_overrides(cx);
 
         let task = cx.spawn_in(window, async move |this, cx| {
             // Await the branch listings we kicked off earlier.
@@ -2990,6 +3046,7 @@ impl AgentPanel {
                 has_non_git,
                 content,
                 selected_agent,
+                config_overrides,
                 cx,
             )
             .await
@@ -3024,6 +3081,7 @@ impl AgentPanel {
         has_non_git: bool,
         content: Vec<acp::ContentBlock>,
         selected_agent: Option<Agent>,
+        config_overrides: Vec<(acp::SessionConfigId, acp::SessionConfigValueId)>,
         cx: &mut AsyncWindowContext,
     ) -> Result<()> {
         let init: Option<
@@ -3108,6 +3166,7 @@ impl AgentPanel {
                 workspace.focus_panel::<AgentPanel>(window, cx);
                 if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                     panel.update(cx, |panel, cx| {
+                        panel.pending_config_overrides = config_overrides;
                         panel.external_thread(
                             selected_agent,
                             None,
