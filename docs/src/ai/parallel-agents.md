@@ -9,17 +9,15 @@ Zed supports running multiple agents in parallel across many projects at the sam
 
 ## Threads Panel {#threads-panel}
 
-The Threads Panel is the control center for your parallel agents. It displays a list of projects and the threads running inside each one, so you can see at a glance what every agent is working on.
-
-Each project appears as a collapsible group, with its threads listed underneath. Active threads show their current status, and you can click any thread to jump into it.
+The Threads Panel is the control center for your parallel agents. It displays a list of projects and the threads running inside each one, so you can see at a glance what every agent is working on. Each project appears as a collapsible group, with its threads listed underneath. Active threads show their current status, and you can click any thread to jump into it.
 
 ## Managing Projects {#managing-projects}
 
 ### Window Scoping {#window-scoping}
 
-The projects in the Threads Panel are scoped per window, just like everything else in Zed. Each window maintains its own independent list of projects and threads.  If you have a set of threads running in one window, you can open additional windows with entirely different sets of threads and projects running in each of them.
+The list of projects in the Threads Panel is scoped to the current window, just like everything else in Zed. If you have a set of threads running in one window, you can open additional windows with different projects also running their own agents in parallel.
 
-Note that the threads are global, and tied to your filesystem, but the projects that organize the threads are local to the window you're looking at.
+Note that the threads themselves are global, and tied to your filesystem, but the list of projects that organize those threads are local to the window you're looking at.
 
 Q: What about if I try to open the same folder in two different windows?
 A: If you have that project opened in a different window then we will focus that window for you. If you do not have a project opened in any window, then we'll open it in this window.
@@ -52,9 +50,11 @@ When you add or remove folders from your current project, the Threads Panel upda
 
 ## Worktrees {#worktrees}
 
-The Zed agent supports automatic work tree initialization across all agents. When you select "New Worktree" from the dropdown, a new Git worktree is created for each root repository in the project. See the worktree specific documentation for how the worktrees are initialized.
+The Zed agent supports automatic worktree initialization across all agents. When you select "New Worktree" from the dropdown, a new Git worktree is created for each root repository in the project. See the worktree specific documentation for how the worktrees are initialized.
 
 For each thread started via this new worktree option, a corresponding thread entry is inserted underneath that project in the Threads Panel, with a chip indicating the worktree used. This lets you run isolated agent sessions on separate worktrees without them interfering with each other's work.
+
+Note that worktrees are considered a separate project, but are only shown as part of their main worktree's project. You can have a window with the main worktree's project open and a window with the linked worktree open, even though normally you can only have one project open at a time.
 
 Worktrees without threads will not show up in the Threads Panel, only their original repository will be shown.
 
