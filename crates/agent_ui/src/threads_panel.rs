@@ -10,6 +10,7 @@ use chrono::Utc;
 use db::kvp::KEY_VALUE_STORE;
 use editor::Editor;
 use feature_flags::{AgentV2FeatureFlag, FeatureFlagViewExt as _};
+
 use gpui::{
     AnyElement, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
     ListState, Pixels, Render, SharedString, Task, WeakEntity, Window, actions, list, prelude::*,
@@ -2155,11 +2156,23 @@ impl Panel for ThreadsPanel {
 
     fn set_position(
         &mut self,
-        _position: DockPosition,
+        position: DockPosition,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        // Position is derived from agent settings and follows the agent panel
+        let Some(fs) = self
+            .multi_workspace
+            .read_with(cx, |mw, cx| {
+                mw.workspace().read(cx).project().read(cx).fs().clone()
+            })
+            .ok()
+        else {
+            return;
+        };
+
+        settings::update_settings_file(fs.clone(), cx, move |settings, _| {
+            settings.agent.get_or_insert_default().dock = Some(position.into());
+        });
     }
 
     fn size(&self, _window: &Window, _cx: &App) -> Pixels {
