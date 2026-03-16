@@ -891,10 +891,12 @@ pub struct GitGraph {
 }
 
 impl GitGraph {
-    fn refresh_search_state(&mut self, cx: &mut Context<Self>) {
+    fn invalidate_state(&mut self, cx: &mut Context<Self>) {
+        self.graph_data.clear();
         self.search_state.matches.clear();
         self.search_state.selected_index = None;
         self.search_state.state.next_state();
+        cx.notify();
     }
 
     fn row_height(cx: &App) -> Pixels {
@@ -939,9 +941,7 @@ impl GitGraph {
                 // todo(git_graph): Make this selectable from UI so we don't have to always use active repository
                 if this.selected_repo_id != *changed_repo_id {
                     this.selected_repo_id = *changed_repo_id;
-                    this.graph_data.clear();
-                    this.refresh_search_state(cx);
-                    cx.notify();
+                    this.invalidate_state(cx);
                 }
             }
             _ => {}
@@ -1082,9 +1082,7 @@ impl GitGraph {
                 // meaning we are not inside the initial repo loading state
                 // NOTE: this fixes an loading performance regression
                 if repository.read(cx).scan_id > 1 {
-                    self.graph_data.clear();
-                    self.refresh_search_state(cx);
-                    cx.notify();
+                    self.invalidate_state(cx);
                 }
             }
             RepositoryEvent::GraphEvent(_, _) => {}
@@ -1365,6 +1363,44 @@ impl GitGraph {
         cx.notify();
     }
 
+    fn select_previous_match(&mut self, cx: &mut Context<Self>) {
+        if self.search_state.matches.is_empty() {
+            return;
+        }
+
+        let mut prev_selection = self.search_state.selected_index.unwrap_or_default();
+
+        if prev_selection == 0 {
+            prev_selection = self.search_state.matches.len() - 1;
+        } else {
+            prev_selection -= 1;
+        }
+
+        let oid = self.search_state.matches[prev_selection];
+        self.search_state.selected_index = Some(prev_selection);
+        self.select_commit_by_sha(oid, cx);
+    }
+
+    fn select_next_match(&mut self, cx: &mut Context<Self>) {
+        if self.search_state.matches.is_empty() {
+            return;
+        }
+
+        let mut next_selection = self
+            .search_state
+            .selected_index
+            .map(|index| index + 1)
+            .unwrap_or_default();
+
+        if next_selection >= self.search_state.matches.len() {
+            next_selection = 0;
+        }
+
+        let oid = self.search_state.matches[next_selection];
+        self.search_state.selected_index = Some(next_selection);
+        self.select_commit_by_sha(oid, cx);
+    }
+
     pub fn select_commit_by_sha(&mut self, sha: impl TryInto<Oid>, cx: &mut Context<Self>) {
         fn inner(this: &mut GitGraph, oid: Oid, cx: &mut Context<GitGraph>) {
             let Some(selected_repository) = this.get_selected_repository(cx) else {
@@ -1544,24 +1580,7 @@ impl GitGraph {
                                             |this| {
                                                 this.disabled(false).on_click(cx.listener(
                                                     |this, _, _, cx| {
-                                                        let mut prev_selection = this
-                                                            .search_state
-                                                            .selected_index
-                                                            .unwrap_or_default();
-
-                                                        if prev_selection == 0 {
-                                                            prev_selection =
-                                                                this.search_state.matches.len() - 1;
-                                                        } else {
-                                                            prev_selection -= 1;
-                                                        }
-
-                                                        let oid = this.search_state.matches
-                                                            [prev_selection];
-
-                                                        this.search_state.selected_index =
-                                                            Some(prev_selection);
-                                                        this.select_commit_by_sha(oid, cx);
+                                                        this.select_previous_match(cx);
                                                     },
                                                 ))
                                             },
@@ -1581,24 +1600,7 @@ impl GitGraph {
                                             |this| {
                                                 this.disabled(false).on_click(cx.listener(
                                                     |this, _, _, cx| {
-                                                        let mut next_selection = this
-                                                            .search_state
-                                                            .selected_index
-                                                            .map(|index| index + 1)
-                                                            .unwrap_or_default();
-
-                                                        if next_selection
-                                                            >= this.search_state.matches.len()
-                                                        {
-                                                            next_selection = 0;
-                                                        }
-
-                                                        let oid = this.search_state.matches
-                                                            [next_selection];
-
-                                                        this.search_state.selected_index =
-                                                            Some(next_selection);
-                                                        this.select_commit_by_sha(oid, cx);
+                                                        this.select_next_match(cx);
                                                     },
                                                 ))
                                             },
