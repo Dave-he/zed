@@ -40,9 +40,9 @@ use std::{
 use theme::{AccentColors, ThemeSettings};
 use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
 use ui::{
-    ButtonLike, Chip, CommonAnimationExt as _, ContextMenu, DiffStat, Divider, ScrollableHandle,
-    Table, TableColumnWidths, TableInteractionState, TableResizeBehavior, Tooltip, WithScrollbar,
-    prelude::*,
+    ButtonLike, Chip, CommonAnimationExt as _, ContextMenu, DiffStat, Divider, HighlightedLabel,
+    ScrollableHandle, Table, TableColumnWidths, TableInteractionState, TableResizeBehavior,
+    Tooltip, WithScrollbar, prelude::*,
 };
 use workspace::{
     Workspace,
@@ -1179,11 +1179,47 @@ impl GitGraph {
                     .unwrap_or_else(|| accent_colors.0.first().copied().unwrap_or_default());
 
                 let is_selected = self.selected_entry_idx == Some(idx);
+                let is_matched = self.search_state.matches.contains(&commit.data.sha);
                 let column_label = |label: SharedString| {
                     Label::new(label)
                         .when(!is_selected, |c| c.color(Color::Muted))
                         .truncate()
                         .into_any_element()
+                };
+
+                let subject_label = if is_matched {
+                    let query = match &self.search_state.state {
+                        QueryState::Confirmed((query, _)) => Some(query.clone()),
+                        _ => None,
+                    };
+                    let highlight_indices = query
+                        .and_then(|q| {
+                            let q = q.to_lowercase();
+                            let subject_lower = subject.to_lowercase();
+                            let mut indices = Vec::new();
+                            let mut start = 0;
+                            while let Some(pos) = subject_lower[start..].find(&q) {
+                                let abs_pos = start + pos;
+                                for i in abs_pos..abs_pos + q.len() {
+                                    if subject.is_char_boundary(i) {
+                                        indices.push(i);
+                                    }
+                                }
+                                start = abs_pos + q.len();
+                            }
+                            if indices.is_empty() {
+                                None
+                            } else {
+                                Some(indices)
+                            }
+                        })
+                        .unwrap_or_default();
+                    HighlightedLabel::new(subject.clone(), highlight_indices)
+                        .when(!is_selected, |c| c.color(Color::Muted))
+                        .truncate()
+                        .into_any_element()
+                } else {
+                    column_label(subject.clone())
                 };
 
                 vec![
@@ -1204,7 +1240,7 @@ impl GitGraph {
                                             .map(|name| self.render_chip(name, accent_color)),
                                     )
                                 }))
-                                .child(column_label(subject)),
+                                .child(subject_label),
                         )
                         .into_any_element(),
                     column_label(formatted_time.into()),
@@ -1669,7 +1705,8 @@ impl GitGraph {
             .copied()
             .unwrap_or_else(|| accent_colors.0.first().copied().unwrap_or_default());
 
-        let (author_name, author_email, commit_timestamp, subject) = match &data {
+        // todo!: We should use the full commit message here
+        let (author_name, author_email, commit_timestamp, commit_message) = match &data {
             CommitDataState::Loaded(data) => (
                 data.author_name.clone(),
                 data.author_email.clone(),
@@ -1925,7 +1962,7 @@ impl GitGraph {
                     ),
             )
             .child(Divider::horizontal())
-            .child(div().p_2().child(Label::new(subject)))
+            .child(div().p_2().child(Label::new(commit_message)))
             .child(Divider::horizontal())
             .child(
                 v_flex()
