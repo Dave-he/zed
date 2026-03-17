@@ -184,9 +184,9 @@ impl Editor {
                         buffers_to_query
                             .into_iter()
                             .filter_map(|buffer| {
-                                let buffer_id = buffer.read(cx).remote_id();
+                                let buffer_snapshot = buffer.read(cx).snapshot();
                                 let colors_task = lsp_store.document_colors(buffer, cx)?;
-                                Some(async move { (buffer_id, colors_task.await) })
+                                Some(async move { (buffer_snapshot, colors_task.await) })
                             })
                             .collect::<Vec<_>>()
                     })
@@ -206,25 +206,15 @@ impl Editor {
             else {
                 return;
             };
-            let editor_excerpts = multi_buffer_snapshot
-                .excerpts()
-                .chunk_by(|excerpt| excerpt.buffer_id());
-            let mut editor_excerpts = editor_excerpts
-                .into_iter()
-                .map(|(buffer_id, excerpts)| (buffer_id, excerpts.into_iter().collect::<Vec<_>>()))
-                .collect::<HashMap<_, _>>();
 
             let mut new_editor_colors: HashMap<BufferId, Vec<(Range<Anchor>, DocumentColor)>> =
                 HashMap::default();
-            for (buffer_id, colors) in all_colors {
-                let Some(excerpts) = editor_excerpts.remove(&buffer_id) else {
-                    continue;
-                };
+            for (buffer_snapshot, colors) in all_colors {
                 match colors {
                     Ok(colors) => {
                         if colors.colors.is_empty() {
                             new_editor_colors
-                                .entry(buffer_id)
+                                .entry(buffer_snapshot.remote_id())
                                 .or_insert_with(Vec::new)
                                 .clear();
                         } else {
@@ -232,36 +222,30 @@ impl Editor {
                                 let color_start = point_from_lsp(color.lsp_range.start);
                                 let color_end = point_from_lsp(color.lsp_range.end);
 
-                                for excerpt in &excerpts {
-                                    let buffer_snapshot = excerpt.buffer_snapshot();
-                                    let start = buffer_snapshot.anchor_before(
-                                        buffer_snapshot.clip_point_utf16(color_start, Bias::Left),
-                                    );
-                                    let end = buffer_snapshot.anchor_after(
-                                        buffer_snapshot.clip_point_utf16(color_end, Bias::Right),
-                                    );
-                                    let Some(range) = excerpt.anchor_range_checked(start..end)
-                                    else {
-                                        continue;
-                                    };
+                                let Some(range) = multi_buffer_snapshot.anchor_range_in_buffer(
+                                    buffer_snapshot.anchor_range_outside(
+                                        buffer_snapshot.clip_point_utf16(color_start, Bias::Left)
+                                            ..buffer_snapshot
+                                                .clip_point_utf16(color_end, Bias::Right),
+                                    ),
+                                ) else {
+                                    continue;
+                                };
 
-                                    let new_buffer_colors =
-                                        new_editor_colors.entry(buffer_id).or_insert_with(Vec::new);
+                                let new_buffer_colors = new_editor_colors
+                                    .entry(buffer_snapshot.remote_id())
+                                    .or_insert_with(Vec::new);
 
-                                    let (Ok(i) | Err(i)) =
-                                        new_buffer_colors.binary_search_by(|(probe, _)| {
-                                            probe
-                                                .start
-                                                .cmp(&range.start, &multi_buffer_snapshot)
-                                                .then_with(|| {
-                                                    probe
-                                                        .end
-                                                        .cmp(&range.end, &multi_buffer_snapshot)
-                                                })
-                                        });
-                                    new_buffer_colors.insert(i, (range, color));
-                                    break;
-                                }
+                                let (Ok(i) | Err(i)) =
+                                    new_buffer_colors.binary_search_by(|(probe, _)| {
+                                        probe
+                                            .start
+                                            .cmp(&range.start, &multi_buffer_snapshot)
+                                            .then_with(|| {
+                                                probe.end.cmp(&range.end, &multi_buffer_snapshot)
+                                            })
+                                    });
+                                new_buffer_colors.insert(i, (range, color));
                             }
                         }
                     }
