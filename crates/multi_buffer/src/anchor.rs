@@ -36,30 +36,28 @@ pub enum Anchor {
 
 // todo!() should this take a lifetime?
 pub(crate) enum AnchorSeekTarget {
-    Min,
     Excerpt {
         path_key: PathKey,
         anchor: ExcerptAnchor,
         // None when the buffer no longer exists in the multibuffer
         snapshot: Option<BufferSnapshot>,
     },
-    Max,
+    Empty,
 }
 
 impl std::fmt::Debug for AnchorSeekTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Min => write!(f, "Min"),
             Self::Excerpt {
                 path_key,
                 anchor,
-                snapshot,
+                snapshot: _,
             } => f
                 .debug_struct("Excerpt")
                 .field("path_key", path_key)
                 .field("anchor", anchor)
                 .finish(),
-            Self::Max => write!(f, "Max"),
+            Self::Empty => write!(f, "Empty"),
         }
     }
 }
@@ -357,12 +355,36 @@ impl Anchor {
         }
     }
 
-    pub(crate) fn seek_target(&self, snapshot: &MultiBufferSnapshot) -> AnchorSeekTarget {
+    fn to_excerpt_anchor(&self, snapshot: &MultiBufferSnapshot) -> Option<ExcerptAnchor> {
         match self {
-            Anchor::Min => AnchorSeekTarget::Min,
-            Anchor::Excerpt(excerpt_anchor) => excerpt_anchor.seek_target(snapshot),
-            Anchor::Max => AnchorSeekTarget::Max,
+            Anchor::Min => {
+                let excerpt = snapshot.excerpts.first()?;
+
+                Some(ExcerptAnchor {
+                    text_anchor: excerpt.range.context.start,
+                    path: excerpt.path_key_index,
+                    diff_base_anchor: None,
+                })
+            }
+            Anchor::Excerpt(excerpt_anchor) => Some(*excerpt_anchor),
+            Anchor::Max => {
+                let excerpt = snapshot.excerpts.last()?;
+
+                Some(ExcerptAnchor {
+                    text_anchor: excerpt.range.context.end,
+                    path: excerpt.path_key_index,
+                    diff_base_anchor: None,
+                })
+            }
         }
+    }
+
+    pub(crate) fn seek_target(&self, snapshot: &MultiBufferSnapshot) -> AnchorSeekTarget {
+        let Some(excerpt_anchor) = self.to_excerpt_anchor(snapshot) else {
+            return AnchorSeekTarget::Empty;
+        };
+
+        excerpt_anchor.seek_target(snapshot)
     }
 
     pub(crate) fn excerpt_anchor(&self) -> Option<ExcerptAnchor> {
@@ -384,11 +406,10 @@ impl Anchor {
         &self,
         snapshot: &MultiBufferSnapshot,
     ) -> Option<AnchorSeekTarget> {
-        match self {
-            Anchor::Min => Some(AnchorSeekTarget::Min),
-            Anchor::Excerpt(excerpt_anchor) => excerpt_anchor.try_seek_target(snapshot),
-            Anchor::Max => Some(AnchorSeekTarget::Max),
-        }
+        let Some(excerpt_anchor) = self.to_excerpt_anchor(snapshot) else {
+            return Some(AnchorSeekTarget::Empty);
+        };
+        excerpt_anchor.try_seek_target(snapshot)
     }
 
     /// Returns the text anchor for this anchor.

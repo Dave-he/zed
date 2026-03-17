@@ -7651,8 +7651,6 @@ impl sum_tree::SeekTarget<'_, ExcerptSummary, ExcerptSummary> for AnchorSeekTarg
         _cx: <ExcerptSummary as sum_tree::Summary>::Context<'_>,
     ) -> cmp::Ordering {
         match self {
-            AnchorSeekTarget::Min => Ordering::Less,
-            AnchorSeekTarget::Max => Ordering::Greater,
             AnchorSeekTarget::Excerpt {
                 path_key,
                 anchor,
@@ -7680,6 +7678,8 @@ impl sum_tree::SeekTarget<'_, ExcerptSummary, ExcerptSummary> for AnchorSeekTarg
                     Ordering::Equal
                 }
             }
+            // This should be dead code because Empty is only constructed for an empty snapshot
+            AnchorSeekTarget::Empty => Ordering::Equal,
         }
     }
 }
