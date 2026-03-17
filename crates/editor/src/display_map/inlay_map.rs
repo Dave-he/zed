@@ -631,7 +631,7 @@ impl InlayMap {
                 };
 
                 for inlay in &self.inlays[start_ix..] {
-                    if !inlay.position.is_valid(&buffer_snapshot) {
+                    if dbg!(!inlay.position.is_valid(&buffer_snapshot)) {
                         continue;
                     }
                     let buffer_offset = inlay.position.to_offset(&buffer_snapshot);

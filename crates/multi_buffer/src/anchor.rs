@@ -205,9 +205,9 @@ impl ExcerptAnchor {
         let Some(buffer_snapshot) = snapshot.buffer_for_id(self.buffer_id()) else {
             return false;
         };
-        if !buffer_snapshot.can_resolve(&self.text_anchor()) {
+        if !self.text_anchor().is_valid(buffer_snapshot) {
             return false;
-        };
+        }
         let mut cursor = snapshot.excerpts.cursor::<ExcerptSummary>(());
         cursor.seek(&target, Bias::Left);
         let Some(excerpt) = cursor.item() else {
