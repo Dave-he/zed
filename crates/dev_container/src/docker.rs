@@ -75,6 +75,53 @@ pub(crate) async fn inspect_image(image: &String) -> Result<DockerInspect, DevCo
     Ok(docker_inspect)
 }
 
+pub(crate) async fn run_docker_exec(
+    container_id: &str,
+    remote_folder: &str,
+    user: &str,
+    env: &HashMap<String, String>,
+    inner_command: Command,
+) -> Result<(), DevContainerErrorV2> {
+    dbg!(&inner_command);
+    let mut command = Command::new(docker_cli());
+
+    command.args(&["exec", "-w", remote_folder, "-u", user]);
+
+    for (k, v) in env.iter() {
+        command.arg("-e");
+        let env_declaration = format!("{}={}", k, v);
+        command.arg(&env_declaration);
+    }
+
+    command.arg(container_id);
+
+    command.arg("sh");
+
+    let mut inner_program_script: Vec<String> =
+        vec![inner_command.get_program().display().to_string()];
+    let mut args: Vec<String> = inner_command
+        .get_args()
+        .map(|arg| arg.display().to_string())
+        .collect();
+    inner_program_script.append(&mut args);
+    command.args(&["-c", &inner_program_script.join(" ")]);
+
+    dbg!(&command);
+
+    let output = command.output().await.map_err(|e| {
+        log::error!("Error running command {e}");
+        DevContainerErrorV2::UnmappedError
+    })?;
+    if !output.status.success() {
+        let std_err = String::from_utf8_lossy(&output.stderr);
+        log::error!("Command produced a non-successful output. StdErr: {std_err}");
+    }
+    let std_out = String::from_utf8_lossy(&output.stdout);
+    log::info!("Command output:\n {std_out}");
+
+    Ok(())
+}
+
 fn deserialize_metadata<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<HashMap<String, serde_json_lenient::Value>>>, D::Error>

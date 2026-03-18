@@ -24,7 +24,7 @@ use worktree::Snapshot;
 use crate::{
     DevContainerContext, DevContainerErrorV2, DevContainerFeature, DevContainerTemplate,
     TemplateEntry,
-    devcontainer_json::DevContainer,
+    devcontainer_json::{DevContainer, LifecyleScript},
     devcontainer_templates_repository, download_devcontainer_template_files, get_ghcr_token,
     get_latest_feature_manifest, get_latest_manifest, get_latest_manifest_for_id, ghcr_url,
     model::{read_devcontainer_configuration, spawn_dev_container},

@@ -20,7 +20,10 @@ use crate::{
         DevContainer, DevContainerBuildType, FeatureOptions, MountDefinition,
         deserialize_devcontainer_json,
     },
-    docker::{DockerInspect, DockerPs, docker_cli, get_remote_dir_from_config, inspect_image},
+    docker::{
+        DockerInspect, DockerPs, docker_cli, get_remote_dir_from_config, inspect_image,
+        run_docker_exec,
+    },
     features::{
         FeatureManifest, download_and_extract_oci_feature, fetch_oci_feature_manifest,
         parse_oci_feature_ref,
@@ -43,6 +46,7 @@ enum ConfigStatus {
 }
 
 struct DevContainerManifest {
+    http_client: Arc<dyn HttpClient>,
     fs: Arc<dyn Fs>,
     raw_config: String,
     config: ConfigStatus,
@@ -58,6 +62,7 @@ const DEFAULT_REMOTE_PROJECT_DIR: &str = "/workspaces/";
 impl DevContainerManifest {
     async fn new(
         fs: Arc<dyn Fs>,
+        http_client: Arc<dyn HttpClient>,
         environment: HashMap<String, String>,
         local_config: DevContainerConfig,
         local_project_path: Arc<&Path>,
@@ -88,6 +93,7 @@ impl DevContainerManifest {
 
         Ok(Self {
             fs,
+            http_client,
             raw_config: devcontainer_contents,
             config: ConfigStatus::Deserialized(devcontainer),
             local_project_directory: local_project_path.to_path_buf(),
@@ -230,7 +236,6 @@ impl DevContainerManifest {
 
     async fn download_feature_and_dockerfile_resources(
         &mut self,
-        http_client: &Arc<dyn HttpClient>,
     ) -> Result<(), DevContainerErrorV2> {
         let dev_container = match &self.config {
             ConfigStatus::Deserialized(_) => {
@@ -349,13 +354,13 @@ impl DevContainerManifest {
                 );
                 DevContainerErrorV2::UnmappedError
             })?;
-            let token = get_oci_token_for_repo(&oci_ref.registry, &oci_ref.path, http_client)
+            let token = get_oci_token_for_repo(&oci_ref.registry, &oci_ref.path, &self.http_client)
                 .await
                 .map_err(|e| {
                     log::error!("Failed to get OCI token for feature '{}': {e}", feature_ref);
                     DevContainerErrorV2::UnmappedError
                 })?;
-            let manifest = fetch_oci_feature_manifest(&oci_ref, &token, http_client)
+            let manifest = fetch_oci_feature_manifest(&oci_ref, &token, &self.http_client)
                 .await
                 .map_err(|e| {
                     log::error!(
@@ -380,7 +385,7 @@ impl DevContainerManifest {
                 digest,
                 &token,
                 &feature_dir,
-                http_client,
+                &self.http_client,
             )
             .await
             .map_err(|e| {
@@ -511,6 +516,12 @@ impl DevContainerManifest {
         &self,
         build_resources: DevContainerBuildResources,
     ) -> Result<DevContainerUp, DevContainerErrorV2> {
+        let ConfigStatus::VariableParsed(config) = &self.config else {
+            log::error!(
+                "Variables have not been parsed; cannot proceed with running the dev container"
+            );
+            return Err(DevContainerErrorV2::UnmappedError);
+        };
         let running_container = match build_resources {
             DevContainerBuildResources::DockerCompose(resources) => {
                 dbg!(&resources);
@@ -1176,6 +1187,155 @@ impl DevContainerManifest {
             .map(|c| c.zed.extensions.clone())
             .unwrap_or_default()
     }
+
+    async fn build_and_run(&mut self) -> Result<DevContainerUp, DevContainerErrorV2> {
+        self.run_initialize_commands().await?;
+
+        self.download_feature_and_dockerfile_resources().await?;
+
+        let build_resources = self.build_resources().await?;
+
+        let devcontainer_up = self.run_dev_container(build_resources).await?;
+
+        self.run_remote_scripts(&devcontainer_up).await?;
+
+        Ok(devcontainer_up)
+    }
+
+    async fn run_remote_scripts_running_container(
+        &self,
+        devcontainer_up: &DevContainerUp,
+    ) -> Result<(), DevContainerErrorV2> {
+        let ConfigStatus::VariableParsed(config) = &self.config else {
+            log::error!("Config not yet parsed, cannot proceed with remote scripts");
+            return Err(DevContainerErrorV2::UnmappedError);
+        };
+        let remote_folder = self.remote_workspace_folder()?.display().to_string();
+
+        if let Some(post_attach_command) = &config.post_attach_command {
+            for (command_name, command) in post_attach_command.script_commands() {
+                log::info!("Running post attach command {command_name}");
+                // TODO remote env
+                run_docker_exec(
+                    &devcontainer_up.container_id,
+                    &remote_folder,
+                    &devcontainer_up.remote_user,
+                    &HashMap::new(),
+                    command,
+                )
+                .await?;
+            }
+            // user_scripts.push(post_attach_command.clone());
+        }
+
+        Ok(())
+    }
+
+    async fn run_remote_scripts(
+        &self,
+        devcontainer_up: &DevContainerUp,
+    ) -> Result<(), DevContainerErrorV2> {
+        let ConfigStatus::VariableParsed(config) = &self.config else {
+            log::error!("Config not yet parsed, cannot proceed with remote scripts");
+            return Err(DevContainerErrorV2::UnmappedError);
+        };
+        let remote_folder = self.remote_workspace_folder()?.display().to_string();
+        // let mut system_scripts = Vec::new();
+        if let Some(on_create_command) = &config.on_create_command {
+            for (command_name, command) in on_create_command.script_commands() {
+                log::info!("Running on create command {command_name}");
+                // TODO remote env
+                run_docker_exec(
+                    &devcontainer_up.container_id,
+                    &remote_folder,
+                    "root",
+                    &HashMap::new(),
+                    command,
+                )
+                .await?;
+            }
+
+            // system_scripts.push(on_create_command.clone());
+        }
+        if let Some(update_content_command) = &config.update_content_command {
+            for (command_name, command) in update_content_command.script_commands() {
+                log::info!("Running update content command {command_name}");
+                // TODO remote env
+                run_docker_exec(
+                    &devcontainer_up.container_id,
+                    &remote_folder,
+                    "root",
+                    &HashMap::new(),
+                    command,
+                )
+                .await?;
+            }
+            // system_scripts.push(update_content_command.clone());
+        }
+
+        if let Some(post_create_command) = &config.post_create_command {
+            for (command_name, command) in post_create_command.script_commands() {
+                log::info!("Running post create command {command_name}");
+                // TODO remote env
+                run_docker_exec(
+                    &devcontainer_up.container_id,
+                    &remote_folder,
+                    &devcontainer_up.remote_user,
+                    &HashMap::new(),
+                    command,
+                )
+                .await?;
+            }
+            // user_scripts.push(post_create_command.clone());
+        }
+        if let Some(post_start_command) = &config.post_start_command {
+            for (command_name, command) in post_start_command.script_commands() {
+                log::info!("Running post start command {command_name}");
+                // TODO remote env
+                run_docker_exec(
+                    &devcontainer_up.container_id,
+                    &remote_folder,
+                    &devcontainer_up.remote_user,
+                    &HashMap::new(),
+                    command,
+                )
+                .await?;
+            }
+            // user_scripts.push(post_start_command.clone());
+        }
+        if let Some(post_attach_command) = &config.post_attach_command {
+            for (command_name, command) in post_attach_command.script_commands() {
+                log::info!("Running post attach command {command_name}");
+                // TODO remote env
+                run_docker_exec(
+                    &devcontainer_up.container_id,
+                    &remote_folder,
+                    &devcontainer_up.remote_user,
+                    &HashMap::new(),
+                    command,
+                )
+                .await?;
+            }
+            // user_scripts.push(post_attach_command.clone());
+        }
+
+        Ok(())
+    }
+
+    async fn run_initialize_commands(&self) -> Result<(), DevContainerErrorV2> {
+        let ConfigStatus::VariableParsed(config) = &self.config else {
+            log::error!("Config not yet parsed, cannot proceed with initializeCommand");
+            return Err(DevContainerErrorV2::UnmappedError);
+        };
+
+        if let Some(initialize_command) = &config.initialize_command {
+            log::info!("Running initialize command");
+            initialize_command.run(&self.local_project_directory).await
+        } else {
+            log::warn!("No initialize command found");
+            Ok(())
+        }
+    }
 }
 
 /// Holds all the information needed to construct a `docker buildx build` command
@@ -1253,6 +1413,7 @@ pub(crate) async fn read_devcontainer_configuration(
 ) -> Result<DevContainer, DevContainerErrorV2> {
     let mut dev_container = DevContainerManifest::new(
         context.fs.clone(),
+        context.http_client.clone(),
         environment,
         config,
         Arc::new(&context.project_directory.as_ref()),
@@ -1270,6 +1431,7 @@ pub(crate) async fn spawn_dev_container(
 ) -> Result<DevContainerUp, DevContainerErrorV2> {
     let mut devcontainer_manifest = DevContainerManifest::new(
         context.fs.clone(),
+        context.http_client.clone(),
         environment,
         config,
         local_project_path.clone(),
@@ -1302,25 +1464,23 @@ pub(crate) async fn spawn_dev_container(
             (&local_project_path.display()).to_string(),
         )?;
 
-        Ok(DevContainerUp {
+        let dev_container_up = DevContainerUp {
             _outcome: "todo".to_string(),
             container_id: docker_ps.id,
             remote_user: remote_user,
             remote_workspace_folder: remote_folder,
             extension_ids: devcontainer_manifest.extension_ids(),
-        })
+        };
+
+        devcontainer_manifest
+            .run_remote_scripts_running_container(&dev_container_up)
+            .await?;
+
+        Ok(dev_container_up)
     } else {
         log::info!("Existing container not found. Building");
 
-        devcontainer_manifest
-            .download_feature_and_dockerfile_resources(&context.http_client)
-            .await?;
-
-        let build_resources = devcontainer_manifest.build_resources().await?;
-
-        devcontainer_manifest
-            .run_dev_container(build_resources)
-            .await
+        devcontainer_manifest.build_and_run().await
     }
 }
 
@@ -1977,8 +2137,10 @@ mod test {
         devcontainer_contents: &str,
     ) -> Result<DevContainerManifest, DevContainerErrorV2> {
         let local_config = init_devcontainer_config(&fs, devcontainer_contents).await;
+        let http_client = fake_http_client();
         DevContainerManifest::new(
             fs,
+            http_client,
             environment,
             local_config,
             Arc::new(&PathBuf::from(TEST_PROJECT_PATH)),

@@ -1,8 +1,9 @@
-use std::{collections::HashMap, fmt::Display};
+use std::{collections::HashMap, fmt::Display, path::Path};
 
 use crate::DevContainerErrorV2;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json_lenient::Value;
+use smol::process::Command;
 
 #[derive(Debug, Deserialize, Serialize, Eq, PartialEq, Clone)]
 #[serde(untagged)]
@@ -157,7 +158,7 @@ impl LifecycleScriptInternal {
 }
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
-pub(crate) struct LifecyleScript {
+pub struct LifecyleScript {
     scripts: HashMap<String, LifecycleScriptInternal>,
 }
 
@@ -225,12 +226,12 @@ pub(crate) struct DevContainer {
     pub(crate) service: Option<String>,
     run_services: Option<Vec<String>>,
     // Scripts
-    initialize_command: Option<LifecyleScript>,
-    on_create_command: Option<LifecyleScript>,
-    update_content_command: Option<LifecyleScript>,
-    post_create_command: Option<LifecyleScript>,
-    post_start_command: Option<LifecyleScript>,
-    post_attach_command: Option<LifecyleScript>,
+    pub(crate) initialize_command: Option<LifecyleScript>,
+    pub(crate) on_create_command: Option<LifecyleScript>,
+    pub(crate) update_content_command: Option<LifecyleScript>,
+    pub(crate) post_create_command: Option<LifecyleScript>,
+    pub(crate) post_start_command: Option<LifecyleScript>,
+    pub(crate) post_attach_command: Option<LifecyleScript>,
     wait_for: Option<LifecycleCommand>,
     host_requirements: Option<HostRequirements>,
 }
@@ -312,6 +313,46 @@ impl LifecyleScript {
     }
     fn from_args(args: Vec<String>) -> Self {
         Self::from_map(HashMap::from([("default".to_string(), args)]))
+    }
+    pub fn script_commands(&self) -> HashMap<String, Command> {
+        self.scripts
+            .iter()
+            .filter_map(|(k, v)| {
+                if let Some(inner_command) = &v.command {
+                    let mut command = Command::new(inner_command);
+                    command.args(&v.args);
+                    Some((k.clone(), command))
+                } else {
+                    log::warn!(
+                        "Lifecycle script command {k}, value {:?} has no program to run. Skipping",
+                        v
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub async fn run(&self, working_directory: &Path) -> Result<(), DevContainerErrorV2> {
+        for (command_name, mut command) in self.script_commands() {
+            log::info!("Running script {command_name}");
+
+            command.current_dir(working_directory);
+
+            let output = command.output().await.map_err(|e| {
+                log::error!("Error running command {command_name}: {e}");
+                DevContainerErrorV2::UnmappedError
+            })?;
+            if !output.status.success() {
+                let std_err = String::from_utf8_lossy(&output.stderr);
+                log::error!(
+                    "Command {command_name} produced a non-successful output. StdErr: {std_err}"
+                );
+            }
+            let std_out = String::from_utf8_lossy(&output.stdout);
+            log::info!("Command {command_name} output:\n {std_out}");
+        }
+        Ok(())
     }
 }
 
