@@ -30,8 +30,8 @@ pub(crate) fn extension_tests() -> Workflow {
 
     let jobs = [
         orchestrate,
-        should_check_rust.guard(check_rust()),
-        should_check_extension.guard(check_extension()),
+        should_check_rust.and_always().guard(check_rust()),
+        should_check_extension.and_always().guard(check_extension()),
     ];
 
     let tests_pass = tests_pass(&jobs, &[]);
