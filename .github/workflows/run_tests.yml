@@ -168,7 +168,7 @@ jobs:
   clippy_windows:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != merge_group
+    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: self-32vcpu-windows-2022
     steps:
     - name: steps::checkout_repo
@@ -198,7 +198,7 @@ jobs:
   clippy_linux:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != merge_group
+    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-16x32-ubuntu-2204
     env:
       CC: clang
@@ -236,7 +236,7 @@ jobs:
   clippy_mac:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != merge_group
+    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-mac-large
     steps:
     - name: steps::checkout_repo
@@ -267,7 +267,7 @@ jobs:
   run_tests_windows:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != merge_group
+    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: self-32vcpu-windows-2022
     steps:
     - name: steps::checkout_repo
@@ -309,7 +309,7 @@ jobs:
   run_tests_linux:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != merge_group
+    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-16x32-ubuntu-2204
     env:
       CC: clang
@@ -367,7 +367,7 @@ jobs:
   run_tests_mac:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != merge_group
+    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-mac-large
     steps:
     - name: steps::checkout_repo
@@ -410,7 +410,7 @@ jobs:
   doctests:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != merge_group
+    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-16x32-ubuntu-2204
     env:
       CC: clang
@@ -454,7 +454,7 @@ jobs:
   check_workspace_binaries:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != merge_group
+    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-8x16-ubuntu-2204
     env:
       CC: clang
@@ -498,7 +498,7 @@ jobs:
   check_wasm:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != merge_group
+    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-8x16-ubuntu-2204
     steps:
     - name: steps::checkout_repo
@@ -537,7 +537,7 @@ jobs:
   check_dependencies:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != merge_group
+    if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-2x4-ubuntu-2404
     env:
       CC: clang
@@ -621,7 +621,7 @@ jobs:
   check_licenses:
     needs:
     - orchestrate
-    if: needs.orchestrate.outputs.run_licenses == 'true' && github.event_name != merge_group
+    if: needs.orchestrate.outputs.run_licenses == 'true' && github.event_name != 'merge_group'
     runs-on: namespace-profile-2x4-ubuntu-2404
     steps:
     - name: steps::checkout_repo

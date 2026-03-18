@@ -169,7 +169,7 @@ impl<'a> PathContextCondition<'a> {
                     merge_queue_condition = self
                         .run_in_merge_queue
                         .not()
-                        .then_some("&& github.event_name != merge_group")
+                        .then_some("&& github.event_name != 'merge_group'")
                         .unwrap_or_default()
                 )
                 .trim(),
