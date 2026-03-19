@@ -6322,13 +6322,24 @@ impl Repository {
                 };
                 let compute_snapshot = this.update(&mut cx, |this, _| {
                     this.paths_needing_status_update.clear();
-                    compute_snapshot(
+                    compute_git_state_snapshot(
                         this.id,
                         this.work_directory_abs_path.clone(),
                         this.snapshot.clone(),
                         backend.clone(),
                     )
                 });
+                let (snapshot, events) = cx.background_spawn(compute_snapshot).await?;
+                this.update(&mut cx, |this, cx| {
+                    this.snapshot = snapshot.clone();
+                    this.clear_pending_ops(cx);
+                    for event in events {
+                        cx.emit(event);
+                    }
+                });
+
+                let compute_snapshot =
+                    compute_git_file_state_snapshot(snapshot.clone(), backend.clone());
                 let (snapshot, events) = cx.background_spawn(compute_snapshot).await?;
                 this.update(&mut cx, |this, cx| {
                     this.snapshot = snapshot.clone();
@@ -6944,47 +6955,88 @@ fn proto_to_commit_details(proto: &proto::GitCommitDetails) -> CommitDetails {
     }
 }
 
-async fn compute_snapshot(
+/// This snapshot computes the state of the repository, including the head commit, branches, and worktrees.
+/// We run this before the file snapshot because it's significantly faster than the file state and allows
+/// the UI (title bar, worktree state, and branch state) to update sooner.
+async fn compute_git_state_snapshot(
     id: RepositoryId,
     work_directory_abs_path: Arc<Path>,
     prev_snapshot: RepositorySnapshot,
     backend: Arc<dyn GitRepository>,
 ) -> Result<(RepositorySnapshot, Vec<RepositoryEvent>)> {
     let mut events = Vec::new();
-    let branches = backend.branches().await?;
+    let head_commit_future = {
+        let backend = backend.clone();
+        async move {
+            Ok(match backend.head_sha().await {
+                Some(head_sha) => backend.show(head_sha).await.log_err(),
+                None => None,
+            })
+        }
+    };
+    let (branches, head_commit, all_worktrees) =
+        futures::future::try_join3(backend.branches(), head_commit_future, backend.worktrees())
+            .await?;
     let branch = branches.into_iter().find(|branch| branch.is_head);
-
-    // Useful when branch is None in detached head state
-    let head_commit = match backend.head_sha().await {
-        Some(head_sha) => backend.show(head_sha).await.log_err(),
-        None => None,
-    };
-
-    let diff_stat_future: BoxFuture<'_, Result<status::GitDiffStat>> = if head_commit.is_some() {
-        backend.diff_stat(&[])
-    } else {
-        future::ready(Ok(status::GitDiffStat {
-            entries: Arc::default(),
-        }))
-        .boxed()
-    };
-    let (statuses, diff_stats, all_worktrees) = futures::future::try_join3(
-        backend.status(&[RepoPath::from_rel_path(
-            &RelPath::new(".".as_ref(), PathStyle::local()).unwrap(),
-        )]),
-        diff_stat_future,
-        backend.worktrees(),
-    )
-    .await?;
 
     let linked_worktrees: Arc<[GitWorktree]> = all_worktrees
         .into_iter()
         .filter(|wt| wt.path != *work_directory_abs_path)
         .collect();
 
+    if branch != prev_snapshot.branch || head_commit != prev_snapshot.head_commit {
+        events.push(RepositoryEvent::BranchChanged);
+    }
+
+    if *linked_worktrees != *prev_snapshot.linked_worktrees {
+        events.push(RepositoryEvent::GitWorktreeListChanged);
+    }
+
+    let (remote_origin_url, remote_upstream_url) =
+        futures::future::join(backend.remote_url("origin"), backend.remote_url("upstream")).await;
+
+    let snapshot = RepositorySnapshot {
+        id,
+        work_directory_abs_path,
+        branch,
+        head_commit,
+        remote_origin_url,
+        remote_upstream_url,
+        linked_worktrees,
+        scan_id: prev_snapshot.scan_id + 1,
+        ..prev_snapshot
+    };
+
+    Ok((snapshot, events))
+}
+
+/// This snapshot computes the git statues, git diff stats, and stash entries.
+/// It can be significantly slower than `compute_git_state_snapshot`. So it's ran separately
+/// This allows the UI to update the title bar sooner
+async fn compute_git_file_state_snapshot(
+    prev_snapshot: RepositorySnapshot,
+    backend: Arc<dyn GitRepository>,
+) -> Result<(RepositorySnapshot, Vec<RepositoryEvent>)> {
+    let diff_stat_future: BoxFuture<'_, Result<status::GitDiffStat>> =
+        if prev_snapshot.head_commit.is_some() {
+            backend.diff_stat(&[])
+        } else {
+            future::ready(Ok(status::GitDiffStat {
+                entries: Arc::default(),
+            }))
+            .boxed()
+        };
+    let (statuses, diff_stats, stash_entries) = futures::future::try_join3(
+        backend.status(&[RepoPath::from_rel_path(
+            &RelPath::new(".".as_ref(), PathStyle::local()).unwrap(),
+        )]),
+        diff_stat_future,
+        backend.stash_entries(),
+    )
+    .await?;
+
     let diff_stat_map: HashMap<&RepoPath, DiffStat> =
         diff_stats.entries.iter().map(|(p, s)| (p, *s)).collect();
-    let stash_entries = backend.stash_entries().await?;
     let mut conflicted_paths = Vec::new();
     let statuses_by_path = SumTree::from_iter(
         statuses.entries.iter().map(|(repo_path, status)| {
@@ -6999,39 +7051,24 @@ async fn compute_snapshot(
         }),
         (),
     );
-    let mut merge_details = prev_snapshot.merge;
+    let mut merge_details = prev_snapshot.merge.clone();
     let conflicts_changed = merge_details.update(&backend, conflicted_paths).await?;
     log::debug!("new merge details: {merge_details:?}");
 
+    let mut events = Vec::new();
     if conflicts_changed || statuses_by_path != prev_snapshot.statuses_by_path {
         events.push(RepositoryEvent::StatusesChanged)
     }
-
-    if branch != prev_snapshot.branch || head_commit != prev_snapshot.head_commit {
-        events.push(RepositoryEvent::BranchChanged);
+    if stash_entries != prev_snapshot.stash_entries {
+        events.push(RepositoryEvent::StashEntriesChanged);
     }
-
-    if *linked_worktrees != *prev_snapshot.linked_worktrees {
-        events.push(RepositoryEvent::GitWorktreeListChanged);
-    }
-
-    let remote_origin_url = backend.remote_url("origin").await;
-    let remote_upstream_url = backend.remote_url("upstream").await;
 
     let snapshot = RepositorySnapshot {
-        id,
-        statuses_by_path,
-        work_directory_abs_path,
-        original_repo_abs_path: prev_snapshot.original_repo_abs_path,
-        path_style: prev_snapshot.path_style,
         scan_id: prev_snapshot.scan_id + 1,
-        branch,
-        head_commit,
         merge: merge_details,
-        remote_origin_url,
-        remote_upstream_url,
+        statuses_by_path,
         stash_entries,
-        linked_worktrees,
+        ..prev_snapshot
     };
 
     Ok((snapshot, events))
