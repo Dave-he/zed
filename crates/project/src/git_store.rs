@@ -6332,7 +6332,6 @@ impl Repository {
                 let (snapshot, events) = cx.background_spawn(compute_snapshot).await?;
                 this.update(&mut cx, |this, cx| {
                     this.snapshot = snapshot.clone();
-                    this.clear_pending_ops(cx);
                     for event in events {
                         cx.emit(event);
                     }
@@ -7010,9 +7009,9 @@ async fn compute_git_state_snapshot(
     Ok((snapshot, events))
 }
 
-/// This snapshot computes the git statues, git diff stats, and stash entries.
-/// It can be significantly slower than `compute_git_state_snapshot`. So it's ran separately
-/// This allows the UI to update the title bar sooner
+/// This snapshot computes the git statuses, git diff stats, and stash entries.
+/// It can be significantly slower than `compute_git_state_snapshot`, so it is run separately.
+/// This allows the UI to update the title bar sooner.
 async fn compute_git_file_state_snapshot(
     prev_snapshot: RepositorySnapshot,
     backend: Arc<dyn GitRepository>,
