@@ -1242,7 +1242,7 @@ impl GitGraph {
                     div()
                         .id(ElementId::NamedInteger("commit-subject".into(), idx as u64))
                         .overflow_hidden()
-                        .tooltip(Tooltip::text(subject.clone()))
+                        .tooltip(Tooltip::text(subject))
                         .child(
                             h_flex()
                                 .gap_2()
@@ -1601,7 +1601,7 @@ impl GitGraph {
                             .child(SearchOption::CaseSensitive.as_button(
                                 search_options,
                                 SearchSource::Buffer,
-                                query_focus_handle.clone(),
+                                query_focus_handle,
                             ))
                             .child(
                                 h_flex()
@@ -1714,7 +1714,7 @@ impl GitGraph {
             .copied()
             .unwrap_or_else(|| accent_colors.0.first().copied().unwrap_or_default());
 
-        // todo!: We should use the full commit message here
+        // todo(git graph): We should use the full commit message here
         let (author_name, author_email, commit_timestamp, commit_message) = match &data {
             CommitDataState::Loaded(data) => (
                 data.author_name.clone(),
