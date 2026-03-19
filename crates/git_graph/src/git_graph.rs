@@ -220,7 +220,7 @@ struct SearchState {
     regex_enabled: bool,
     editor: Entity<Editor>,
     state: QueryState,
-    pub matches: Vec<Oid>,
+    pub matches: IndexSet<Oid>,
     pub selected_index: Option<usize>,
 }
 
@@ -981,7 +981,7 @@ impl GitGraph {
             search_state: SearchState {
                 regex_enabled: false,
                 editor: search_editor,
-                matches: Vec::new(),
+                matches: IndexSet::default(),
                 selected_index: None,
                 state: QueryState::Empty,
             },
@@ -1412,7 +1412,10 @@ impl GitGraph {
             prev_selection -= 1;
         }
 
-        let oid = self.search_state.matches[prev_selection];
+        let Some(&oid) = self.search_state.matches.get_index(prev_selection) else {
+            return;
+        };
+
         self.search_state.selected_index = Some(prev_selection);
         self.select_commit_by_sha(oid, cx);
     }
@@ -1432,7 +1435,10 @@ impl GitGraph {
             next_selection = 0;
         }
 
-        let oid = self.search_state.matches[next_selection];
+        let Some(&oid) = self.search_state.matches.get_index(next_selection) else {
+            return;
+        };
+
         self.search_state.selected_index = Some(next_selection);
         self.select_commit_by_sha(oid, cx);
     }
