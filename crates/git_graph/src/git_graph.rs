@@ -1,5 +1,5 @@
 use collections::{BTreeMap, HashMap, IndexSet};
-use editor::{Editor, EditorElement, EditorStyle};
+use editor::Editor;
 use feature_flags::{FeatureFlagAppExt as _, GitGraphFeatureFlag};
 use git::{
     BuildCommitPermalinkParams, GitHostingProviderRegistry, GitRemote, Oid, ParsedGitRemote,
@@ -956,7 +956,7 @@ impl GitGraph {
 
         let search_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Search commits...", window, cx);
+            editor.set_placeholder_text("Search commits…", window, cx);
             editor
         });
 
@@ -1524,36 +1524,8 @@ impl GitGraph {
         })
     }
 
-    fn render_search_input(&self, cx: &App) -> impl IntoElement {
-        let settings = ThemeSettings::get_global(cx);
-        let text_style = gpui::TextStyle {
-            color: if self.search_state.editor.read(cx).read_only(cx) {
-                cx.theme().colors().text_disabled
-            } else {
-                cx.theme().colors().text
-            },
-            font_family: settings.buffer_font.family.clone(),
-            font_features: settings.buffer_font.features.clone(),
-            font_fallbacks: settings.buffer_font.fallbacks.clone(),
-            font_size: rems(0.875).into(),
-            font_weight: settings.buffer_font.weight,
-            line_height: relative(1.3),
-            ..gpui::TextStyle::default()
-        };
-
-        EditorElement::new(
-            &self.search_state.editor,
-            EditorStyle {
-                background: cx.theme().colors().toolbar_background,
-                local_player: cx.theme().players().local(),
-                text: text_style,
-                ..EditorStyle::default()
-            },
-        )
-    }
-
     fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme_colors = cx.theme().colors();
+        let color = cx.theme().colors();
         let query_focus_handle = self.search_state.editor.focus_handle(cx);
         let search_options = {
             let mut options = SearchOptions::NONE;
@@ -1566,108 +1538,74 @@ impl GitGraph {
 
         h_flex()
             .w_full()
-            .items_center()
-            .gap_2()
-            .p_2()
+            .p_1p5()
+            .gap_1p5()
             .border_b_1()
-            .border_color(theme_colors.border)
+            .border_color(color.border_variant)
             .child(
                 h_flex()
                     .h_8()
                     .flex_1()
                     .min_w_0()
-                    .items_center()
-                    .pl_2()
-                    .pr_1()
-                    .gap_2()
+                    .px_1p5()
+                    .gap_1()
                     .border_1()
-                    .border_color(theme_colors.border)
+                    .border_color(color.border)
                     .rounded_md()
-                    .bg(theme_colors.toolbar_background)
-                    .child(Icon::new(IconName::MagnifyingGlass).color(Color::Muted))
+                    .bg(color.toolbar_background)
+                    .on_action(cx.listener(Self::confirm_search))
+                    .child(self.search_state.editor.clone())
+                    .child(SearchOption::CaseSensitive.as_button(
+                        search_options,
+                        SearchSource::Buffer,
+                        query_focus_handle,
+                    )),
+            )
+            .child(
+                h_flex()
+                    .min_w_64()
+                    .gap_1()
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(self.render_search_input(cx))
-                            .on_action(cx.listener(Self::confirm_search)),
+                        IconButton::new("git-graph-search-prev", IconName::ChevronLeft)
+                            .shape(ui::IconButtonShape::Square)
+                            .icon_size(IconSize::Small)
+                            .map(|this| {
+                                if self.search_state.matches.is_empty() {
+                                    this.disabled(true)
+                                } else {
+                                    this.disabled(false).on_click(cx.listener(|this, _, _, cx| {
+                                        this.select_previous_match(cx);
+                                    }))
+                                }
+                            }),
                     )
                     .child(
-                        h_flex()
-                            .flex_none()
-                            .items_center()
-                            .gap_1()
-                            .child(SearchOption::CaseSensitive.as_button(
-                                search_options,
-                                SearchSource::Buffer,
-                                query_focus_handle,
-                            ))
-                            .child(
-                                h_flex()
-                                    .ml_1()
-                                    .pl_1p5()
-                                    .items_center()
-                                    .gap_1()
-                                    .border_l_1()
-                                    .border_color(theme_colors.border_variant)
-                                    .child(
-                                        IconButton::new(
-                                            "git-graph-search-prev",
-                                            IconName::ChevronLeft,
-                                        )
-                                        .style(ButtonStyle::Subtle)
-                                        .shape(ui::IconButtonShape::Square)
-                                        .icon_size(IconSize::Small)
-                                        .disabled(true)
-                                        .when(
-                                            !self.search_state.matches.is_empty(),
-                                            |this| {
-                                                this.disabled(false).on_click(cx.listener(
-                                                    |this, _, _, cx| {
-                                                        this.select_previous_match(cx);
-                                                    },
-                                                ))
-                                            },
-                                        ),
-                                    )
-                                    .child(
-                                        IconButton::new(
-                                            "git-graph-search-next",
-                                            IconName::ChevronRight,
-                                        )
-                                        .style(ButtonStyle::Subtle)
-                                        .shape(ui::IconButtonShape::Square)
-                                        .icon_size(IconSize::Small)
-                                        .disabled(true)
-                                        .when(
-                                            !self.search_state.matches.is_empty(),
-                                            |this| {
-                                                this.disabled(false).on_click(cx.listener(
-                                                    |this, _, _, cx| {
-                                                        this.select_next_match(cx);
-                                                    },
-                                                ))
-                                            },
-                                        ),
-                                    )
-                                    .child(
-                                        div().ml_2().min_w(px(40.)).child(
-                                            Label::new(format!(
-                                                "{}/{}",
-                                                self.search_state
-                                                    .selected_index
-                                                    .map(|index| index + 1)
-                                                    .unwrap_or(0),
-                                                self.search_state.matches.len()
-                                            ))
-                                            .size(LabelSize::Small)
-                                            .when(self.search_state.matches.is_empty(), |this| {
-                                                this.color(Color::Disabled)
-                                            }),
-                                        ),
-                                    ),
-                            ),
+                        IconButton::new("git-graph-search-next", IconName::ChevronRight)
+                            .shape(ui::IconButtonShape::Square)
+                            .icon_size(IconSize::Small)
+                            .map(|this| {
+                                if self.search_state.matches.is_empty() {
+                                    this.disabled(true)
+                                } else {
+                                    this.disabled(false).on_click(cx.listener(|this, _, _, cx| {
+                                        this.select_next_match(cx);
+                                    }))
+                                }
+                            }),
+                    )
+                    .child(
+                        Label::new(format!(
+                            "{}/{}",
+                            self.search_state
+                                .selected_index
+                                .map(|index| index + 1)
+                                .unwrap_or(0),
+                            self.search_state.matches.len()
+                        ))
+                        .size(LabelSize::Small)
+                        .when(self.search_state.matches.is_empty(), |this| {
+                            this.color(Color::Disabled)
+                        }),
                     ),
             )
     }
