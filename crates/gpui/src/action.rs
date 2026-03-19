@@ -1,7 +1,7 @@
 use anyhow::{Context as _, Result};
 use collections::HashMap;
 pub use gpui_macros::Action;
-pub use no_action::{NoAction, is_no_action};
+pub use no_action::{NoAction, Unbind, is_no_action, is_unbind};
 use serde_json::json;
 use std::{
     any::{Any, TypeId},
@@ -439,12 +439,20 @@ mod no_action {
         [
             /// Action with special handling which unbinds the keybinding this is associated with,
             /// if it is the highest precedence match.
-            NoAction
+            NoAction,
+            /// Action with special handling which unbinds only later bindings with the exact same
+            /// keystrokes and context predicate, while allowing other bindings to fall through.
+            Unbind
         ]
     );
 
     /// Returns whether or not this action represents a removed key binding.
     pub fn is_no_action(action: &dyn gpui::Action) -> bool {
         action.as_any().type_id() == (NoAction {}).type_id()
+    }
+
+    /// Returns whether or not this action represents an exact unbind marker.
+    pub fn is_unbind(action: &dyn gpui::Action) -> bool {
+        action.as_any().type_id() == (Unbind {}).type_id()
     }
 }

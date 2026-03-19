@@ -4,7 +4,7 @@ mod context;
 pub use binding::*;
 pub use context::*;
 
-use crate::{Action, AsKeystroke, Keystroke, is_no_action};
+use crate::{Action, AsKeystroke, Keystroke, is_no_action, is_unbind};
 use collections::{HashMap, HashSet};
 use smallvec::SmallVec;
 use std::any::TypeId;
@@ -19,7 +19,7 @@ pub struct KeymapVersion(usize);
 pub struct Keymap {
     bindings: Vec<KeyBinding>,
     binding_indices_by_action_id: HashMap<TypeId, SmallVec<[usize; 3]>>,
-    no_action_binding_indices: Vec<usize>,
+    disabled_binding_indices: Vec<usize>,
     version: KeymapVersion,
 }
 
@@ -44,8 +44,8 @@ impl Keymap {
     pub fn add_bindings<T: IntoIterator<Item = KeyBinding>>(&mut self, bindings: T) {
         for binding in bindings {
             let action_id = binding.action().as_any().type_id();
-            if is_no_action(&*binding.action) {
-                self.no_action_binding_indices.push(self.bindings.len());
+            if is_no_action(&*binding.action) || is_unbind(&*binding.action) {
+                self.disabled_binding_indices.push(self.bindings.len());
             } else {
                 self.binding_indices_by_action_id
                     .entry(action_id)
@@ -62,7 +62,7 @@ impl Keymap {
     pub fn clear(&mut self) {
         self.bindings.clear();
         self.binding_indices_by_action_id.clear();
-        self.no_action_binding_indices.clear();
+        self.disabled_binding_indices.clear();
         self.version.0 += 1;
     }
 
@@ -90,21 +90,31 @@ impl Keymap {
                 return None;
             }
 
-            for null_ix in &self.no_action_binding_indices {
-                if null_ix > ix {
-                    let null_binding = &self.bindings[*null_ix];
-                    if null_binding.keystrokes == binding.keystrokes {
-                        let null_binding_matches =
-                            match (&null_binding.context_predicate, &binding.context_predicate) {
-                                (None, _) => true,
-                                (Some(_), None) => false,
-                                (Some(null_predicate), Some(predicate)) => {
-                                    null_predicate.is_superset(predicate)
-                                }
-                            };
-                        if null_binding_matches {
+            for disabled_ix in &self.disabled_binding_indices {
+                if disabled_ix > ix {
+                    let disabled_binding = &self.bindings[*disabled_ix];
+                    if disabled_binding.keystrokes != binding.keystrokes {
+                        continue;
+                    }
+
+                    if is_no_action(&*disabled_binding.action) {
+                        let disabled_binding_matches = match (
+                            &disabled_binding.context_predicate,
+                            &binding.context_predicate,
+                        ) {
+                            (None, _) => true,
+                            (Some(_), None) => false,
+                            (Some(disabled_predicate), Some(predicate)) => {
+                                disabled_predicate.is_superset(predicate)
+                            }
+                        };
+                        if disabled_binding_matches {
                             return None;
                         }
+                    } else if is_unbind(&*disabled_binding.action)
+                        && disabled_binding.context_predicate == binding.context_predicate
+                    {
+                        return None;
                     }
                 }
             }
@@ -170,6 +180,7 @@ impl Keymap {
 
         let mut bindings: SmallVec<[_; 1]> = SmallVec::new();
         let mut first_binding_index = None;
+        let mut unbound_bindings = Vec::new();
 
         for (_, ix, binding) in matched_bindings {
             if is_no_action(&*binding.action) {
@@ -186,6 +197,25 @@ impl Keymap {
                 // For non-user NoAction bindings, continue searching for user overrides
                 continue;
             }
+
+            if is_unbind(&*binding.action) {
+                unbound_bindings.push((
+                    binding.keystrokes.clone(),
+                    binding.context_predicate.clone(),
+                ));
+                continue;
+            }
+
+            if unbound_bindings
+                .iter()
+                .any(|(keystrokes, context_predicate)| {
+                    *keystrokes == binding.keystrokes
+                        && *context_predicate == binding.context_predicate
+                })
+            {
+                continue;
+            }
+
             bindings.push(binding.clone());
             first_binding_index.get_or_insert(ix);
         }
@@ -197,7 +227,7 @@ impl Keymap {
             {
                 continue;
             }
-            if is_no_action(&*binding.action) {
+            if is_no_action(&*binding.action) || is_unbind(&*binding.action) {
                 pending.remove(&&binding.keystrokes);
                 continue;
             }
@@ -232,7 +262,10 @@ impl Keymap {
                 match pending {
                     None => None,
                     Some(is_pending) => {
-                        if !is_pending || is_no_action(&*binding.action) {
+                        if !is_pending
+                            || is_no_action(&*binding.action)
+                            || is_unbind(&*binding.action)
+                        {
                             return None;
                         }
                         Some((depth, BindingIndex(ix), binding))
@@ -256,7 +289,7 @@ impl Keymap {
 mod tests {
     use super::*;
     use crate as gpui;
-    use gpui::NoAction;
+    use gpui::{NoAction, Unbind};
 
     actions!(
         test_only,
@@ -709,6 +742,53 @@ mod tests {
         assert_bindings(&keymap, &ActionAlpha {}, &["ctrl-a"]);
         assert_bindings(&keymap, &ActionBeta {}, &[]);
         assert_bindings(&keymap, &ActionGamma {}, &["ctrl-c"]);
+
+        #[track_caller]
+        fn assert_bindings(keymap: &Keymap, action: &dyn Action, expected: &[&str]) {
+            let actual = keymap
+                .bindings_for_action(action)
+                .map(|binding| binding.keystrokes[0].inner().unparse())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{:?}", action);
+        }
+    }
+
+    #[test]
+    fn test_exact_unbind_falls_through_to_other_contexts() {
+        let bindings = [
+            KeyBinding::new("tab", ActionAlpha {}, Some("Editor")),
+            KeyBinding::new("tab", ActionBeta {}, Some("Editor && showing_completions")),
+            KeyBinding::new("tab", ActionGamma {}, Some("Editor && edit_prediction")),
+            KeyBinding::new("tab", Unbind {}, Some("Editor && edit_prediction")),
+        ];
+
+        let mut keymap = Keymap::default();
+        keymap.add_bindings(bindings);
+
+        let (result, pending) = keymap.bindings_for_input(
+            &[Keystroke::parse("tab").unwrap()],
+            &[KeyContext::parse("Editor showing_completions edit_prediction").unwrap()],
+        );
+
+        assert!(!pending);
+        assert_eq!(result.len(), 2);
+        assert!(result[0].action.partial_eq(&ActionBeta {}));
+        assert!(result[1].action.partial_eq(&ActionAlpha {}));
+    }
+
+    #[test]
+    fn test_bindings_for_action_respects_exact_unbind() {
+        let bindings = [
+            KeyBinding::new("tab", ActionAlpha {}, Some("Editor && edit_prediction")),
+            KeyBinding::new("tab", Unbind {}, Some("Editor && edit_prediction")),
+            KeyBinding::new("tab", ActionBeta {}, Some("Editor && showing_completions")),
+        ];
+
+        let mut keymap = Keymap::default();
+        keymap.add_bindings(bindings);
+
+        assert_bindings(&keymap, &ActionAlpha {}, &[]);
+        assert_bindings(&keymap, &ActionBeta {}, &["tab"]);
 
         #[track_caller]
         fn assert_bindings(keymap: &Keymap, action: &dyn Action, expected: &[&str]) {
