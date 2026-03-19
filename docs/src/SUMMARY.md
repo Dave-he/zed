@@ -63,11 +63,11 @@
 
 # Zed Business
 
-- [Overview]()
-- [Organizations]()
+- [Overview](./business/overview.md)
+- [Organizations](./business/organizations.md)
 - [Roles & Permissions](./roles.md)
-- [Admin Controls]()
-- [Business Support]()
+- [Admin Controls](./business/admin-controls.md)
+- [Business Support](./business/business-support.md)
 
 # Privacy & Security
 
