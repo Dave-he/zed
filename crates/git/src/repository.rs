@@ -181,7 +181,6 @@ pub struct GraphCommitData {
     pub author_email: SharedString,
     pub commit_timestamp: i64,
     pub subject: SharedString,
-    pub commit_message: SharedString,
 }
 
 #[derive(Debug)]
@@ -235,7 +234,6 @@ fn parse_cat_file_commit(sha: Oid, content: &str) -> Option<GraphCommitData> {
     let mut author_email = SharedString::default();
     let mut commit_timestamp = 0i64;
     let mut in_headers = true;
-    let mut commit_message = Vec::default();
     let mut subject = None;
 
     for line in content.lines() {
@@ -265,14 +263,8 @@ fn parse_cat_file_commit(sha: Oid, content: &str) -> Option<GraphCommitData> {
             }
         } else if subject.is_none() {
             subject = Some(SharedString::from(line.to_string()));
-            commit_message.push(line);
-        } else {
-            commit_message.push(line);
         }
     }
-
-    // todo! see if we can use the slice directly
-    let commit_message = SharedString::from(commit_message.join("\n"));
 
     Some(GraphCommitData {
         sha,
@@ -281,7 +273,6 @@ fn parse_cat_file_commit(sha: Oid, content: &str) -> Option<GraphCommitData> {
         author_email,
         commit_timestamp,
         subject: subject.unwrap_or_default(),
-        commit_message,
     })
 }
 
