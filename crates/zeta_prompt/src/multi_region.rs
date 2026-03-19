@@ -791,8 +791,10 @@ pub fn encode_from_old_and_new_v0316(
                 span_common_prefix,
                 span_common_suffix,
             );
-            // Ensure char boundary safety and monotonicity
-            new_span.floor_char_boundary(mapped)
+            // Snap to a stable line boundary so markers don't split tokens/identifiers.
+            // We prefer the first line start at or after `mapped`, falling back to the
+            // nearest prior line start if needed.
+            snap_to_line_start(new_span, mapped)
         };
 
         // Ensure monotonicity (each block gets at least zero content)
@@ -930,7 +932,7 @@ pub fn encode_from_old_and_new_v0317(
                 span_common_prefix,
                 span_common_suffix,
             );
-            new_span.floor_char_boundary(mapped)
+            snap_to_line_start(new_span, mapped)
         };
 
         let new_rel_end = new_rel_end.max(prev_new_rel);
@@ -994,6 +996,30 @@ fn map_boundary_offset(
             new_changed_start + ((old_rel - old_changed_start) * new_changed_len / old_changed_len)
         }
     }
+}
+
+fn snap_to_line_start(text: &str, offset: usize) -> usize {
+    let bounded = offset.min(text.len());
+    let bounded = text.floor_char_boundary(bounded);
+
+    if bounded >= text.len() {
+        return text.len();
+    }
+
+    // If already at a line start, keep it.
+    if bounded == 0 || text.as_bytes().get(bounded - 1) == Some(&b'\n') {
+        return bounded;
+    }
+
+    // Prefer the next line start to preserve forward progress.
+    if let Some(next_nl_rel) = text[bounded..].find('\n') {
+        let next = bounded + next_nl_rel + 1;
+        return text.floor_char_boundary(next.min(text.len()));
+    }
+
+    // No following newline: fall back to previous line start.
+    let prev_start = text[..bounded].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+    text.floor_char_boundary(prev_start)
 }
 
 #[cfg(test)]
@@ -1411,5 +1437,70 @@ mod tests {
             encode_from_old_and_new_v0317(old, new, Some(5), "<|user_cursor|>", "<|end|>").unwrap();
         assert!(result.contains("<|user_cursor|>"), "result: {result}");
         assert!(result.contains("<|marker-0|>"), "result: {result}");
+    }
+
+    #[test]
+    fn test_encode_v0317_markers_stay_on_line_boundaries() {
+        let old = "\
+\t\t\t\tcontinue outer;
+\t\t\t}
+\t\t}
+\t}
+
+\tconst intersectionObserver = new IntersectionObserver((entries) => {
+\t\tfor (const entry of entries) {
+\t\t\tif (entry.isIntersecting) {
+\t\t\t\tintersectionObserver.unobserve(entry.target);
+\t\t\t\tanchorPreload(/** @type {HTMLAnchorElement} */ (entry.target));
+\t\t\t}
+\t\t}
+\t});
+
+\tconst observer = new MutationObserver(() => {
+\t\tconst links = /** @type {NodeListOf<HTMLAnchorElement>} */ (
+\t\t\tdocument.querySelectorAll('a[data-preload]')
+\t\t);
+
+\t\tfor (const link of links) {
+\t\t\tif (linkSet.has(link)) continue;
+\t\t\tlinkSet.add(link);
+
+\t\t\tswitch (link.dataset.preload) {
+\t\t\t\tcase '':
+\t\t\t\tcase 'true':
+\t\t\t\tcase 'hover': {
+\t\t\t\t\tlink.addEventListener('mouseenter', function callback() {
+\t\t\t\t\t\tlink.removeEventListener('mouseenter', callback);
+\t\t\t\t\t\tanchorPreload(link);
+\t\t\t\t\t});
+";
+        let new = old.replacen(
+            "\t\t\t\tcase 'true':\n",
+            "\t\t\t\tcase 'TRUE':<|user_cursor|>\n",
+            1,
+        );
+
+        let cursor_offset = new.find("<|user_cursor|>").expect("cursor marker in new");
+        let new_without_cursor = new.replace("<|user_cursor|>", "");
+
+        let encoded = encode_from_old_and_new_v0317(
+            old,
+            &new_without_cursor,
+            Some(cursor_offset),
+            "<|user_cursor|>",
+            "<|end|>",
+        )
+        .unwrap();
+
+        let core = encoded.strip_suffix("<|end|>").unwrap_or(&encoded);
+        for marker in collect_relative_marker_tags(core) {
+            let tag_start = marker.tag_start;
+            assert!(
+                tag_start == 0 || core.as_bytes()[tag_start - 1] == b'\n',
+                "marker not at line boundary: {} in output:\n{}",
+                marker_tag_relative(marker.delta),
+                core
+            );
+        }
     }
 }
