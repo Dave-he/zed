@@ -740,7 +740,7 @@ impl LogSource {
 
 pub struct SearchCommitArgs {
     pub query: SharedString,
-    pub is_regex: bool,
+    pub case_sensitive: bool,
 }
 
 pub trait GitRepository: Send + Sync {
@@ -1000,9 +1000,7 @@ pub trait GitRepository: Send + Sync {
         log_source: LogSource,
         search_args: SearchCommitArgs,
         request_tx: Sender<Vec<Oid>>,
-    ) -> BoxFuture<'_, Result<()>> {
-        todo!("Remove default impl")
-    }
+    ) -> BoxFuture<'_, Result<()>>;
 
     fn commit_data_reader(&self) -> Result<CommitDataReader>;
 
@@ -2840,13 +2838,18 @@ impl GitRepository for RealGitRepository {
         async move {
             let git = git_binary?;
 
-            let mut command = git.build_command(&[
-                "log",
-                SEARCH_COMMIT_FORMAT,
-                log_source.get_arg()?,
-                "--grep",
-                search_args.query.as_str(),
-            ]);
+            let mut args = vec!["log", SEARCH_COMMIT_FORMAT, log_source.get_arg()?];
+
+            args.push("--fixed-strings");
+
+            if !search_args.case_sensitive {
+                args.push("--regexp-ignore-case");
+            }
+
+            args.push("--grep");
+            args.push(search_args.query.as_str());
+
+            let mut command = git.build_command(&args);
             command.stdout(Stdio::piped());
             command.stderr(Stdio::null());
 

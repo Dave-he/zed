@@ -27,6 +27,7 @@ use project::{
         RepositoryEvent, RepositoryId,
     },
 };
+use search::{SearchOption, SearchOptions, SearchSource, ToggleCaseSensitive};
 use settings::Settings;
 use smallvec::{SmallVec, smallvec};
 use std::{
@@ -217,7 +218,7 @@ impl QueryState {
 }
 
 struct SearchState {
-    regex_enabled: bool,
+    case_sensitive: bool,
     editor: Entity<Editor>,
     state: QueryState,
     pub matches: IndexSet<Oid>,
@@ -979,7 +980,7 @@ impl GitGraph {
         let mut this = GitGraph {
             focus_handle,
             search_state: SearchState {
-                regex_enabled: false,
+                case_sensitive: false,
                 editor: search_editor,
                 matches: IndexSet::default(),
                 selected_index: None,
@@ -1194,19 +1195,34 @@ impl GitGraph {
                     };
                     let highlight_indices = query
                         .and_then(|q| {
-                            let q = q.to_lowercase();
-                            let subject_lower = subject.to_lowercase();
                             let mut indices = Vec::new();
                             let mut start = 0;
-                            while let Some(pos) = subject_lower[start..].find(&q) {
-                                let abs_pos = start + pos;
-                                for i in abs_pos..abs_pos + q.len() {
-                                    if subject.is_char_boundary(i) {
-                                        indices.push(i);
+
+                            if self.search_state.case_sensitive {
+                                while let Some(pos) = subject[start..].find(q.as_str()) {
+                                    let abs_pos = start + pos;
+                                    for i in abs_pos..abs_pos + q.len() {
+                                        if subject.is_char_boundary(i) {
+                                            indices.push(i);
+                                        }
                                     }
+                                    start = abs_pos + q.len();
                                 }
-                                start = abs_pos + q.len();
+                            } else {
+                                let q = q.to_lowercase();
+                                let subject_lower = subject.to_lowercase();
+
+                                while let Some(pos) = subject_lower[start..].find(&q) {
+                                    let abs_pos = start + pos;
+                                    for i in abs_pos..abs_pos + q.len() {
+                                        if subject.is_char_boundary(i) {
+                                            indices.push(i);
+                                        }
+                                    }
+                                    start = abs_pos + q.len();
+                                }
                             }
+
                             if indices.is_empty() {
                                 None
                             } else {
@@ -1315,7 +1331,7 @@ impl GitGraph {
                 self.log_source.clone(),
                 SearchCommitArgs {
                     query: query.clone(),
-                    is_regex: false,
+                    case_sensitive: self.search_state.case_sensitive,
                 },
                 request_tx,
                 cx,
@@ -1546,6 +1562,14 @@ impl GitGraph {
     fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_colors = cx.theme().colors();
         let query_focus_handle = self.search_state.editor.focus_handle(cx);
+        let search_options = {
+            let mut options = SearchOptions::NONE;
+            options.set(
+                SearchOptions::CASE_SENSITIVE,
+                self.search_state.case_sensitive,
+            );
+            options
+        };
 
         h_flex()
             .w_full()
@@ -1581,25 +1605,11 @@ impl GitGraph {
                             .flex_none()
                             .items_center()
                             .gap_1()
-                            .child(
-                                IconButton::new("git-graph-search-regex", IconName::Regex)
-                                    .style(ButtonStyle::Subtle)
-                                    .shape(ui::IconButtonShape::Square)
-                                    .icon_size(IconSize::Small)
-                                    .toggle_state(self.search_state.regex_enabled)
-                                    .tooltip(Tooltip::text("Use Regular Expressions"))
-                                    .on_click({
-                                        let query_focus_handle = query_focus_handle.clone();
-                                        cx.listener(move |this, _, window, cx| {
-                                            if !query_focus_handle.is_focused(window) {
-                                                window.focus(&query_focus_handle, cx);
-                                            }
-                                            this.search_state.regex_enabled =
-                                                !this.search_state.regex_enabled;
-                                            cx.notify();
-                                        })
-                                    }),
-                            )
+                            .child(SearchOption::CaseSensitive.as_button(
+                                search_options,
+                                SearchSource::Buffer,
+                                query_focus_handle.clone(),
+                            ))
                             .child(
                                 h_flex()
                                     .ml_1()
@@ -2633,6 +2643,11 @@ impl Render for GitGraph {
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_last))
             .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(|this, _: &ToggleCaseSensitive, _window, cx| {
+                this.search_state.case_sensitive = !this.search_state.case_sensitive;
+                this.search_state.state.next_state();
+                cx.notify();
+            }))
             .child(
                 v_flex()
                     .size_full()
