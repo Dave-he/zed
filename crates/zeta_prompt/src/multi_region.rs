@@ -5,6 +5,7 @@ pub const MARKER_TAG_SUFFIX: &str = "|>";
 pub const RELATIVE_MARKER_TAG_PREFIX: &str = "<|marker";
 const MIN_BLOCK_LINES: usize = 3;
 const MAX_BLOCK_LINES: usize = 8;
+const HARD_CAP_BOUNDARY_MAX_FORWARD_LINES: usize = 5;
 pub const V0316_END_MARKER: &str = "<[end▁of▁sentence]>";
 pub const V0317_END_MARKER: &str = "<[end▁of▁sentence]>";
 
@@ -51,7 +52,13 @@ pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
                 // Blank-line boundary found. We'll place the marker when we
                 // find the next non-blank line (handled below).
             } else if lines_since_last_marker >= MAX_BLOCK_LINES {
-                offsets.push(actual_line_end);
+                let boundary = nudge_hard_cap_boundary_forward(
+                    editable_text,
+                    actual_line_end,
+                    HARD_CAP_BOUNDARY_MAX_FORWARD_LINES,
+                )
+                .unwrap_or(actual_line_end);
+                offsets.push(boundary);
                 lines_since_last_marker = 0;
             }
         }
@@ -82,8 +89,14 @@ pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
         // Re-check after blank-line logic since lines_since_last_marker may
         // have been reset.
         if !is_past_end && lines_since_last_marker >= MAX_BLOCK_LINES {
-            if *offsets.last().unwrap_or(&0) != actual_line_end {
-                offsets.push(actual_line_end);
+            let boundary = nudge_hard_cap_boundary_forward(
+                editable_text,
+                actual_line_end,
+                HARD_CAP_BOUNDARY_MAX_FORWARD_LINES,
+            )
+            .unwrap_or(actual_line_end);
+            if *offsets.last().unwrap_or(&0) != boundary {
+                offsets.push(boundary);
                 lines_since_last_marker = 0;
             }
         }
@@ -1022,6 +1035,51 @@ fn snap_to_line_start(text: &str, offset: usize) -> usize {
     text.floor_char_boundary(prev_start)
 }
 
+fn nudge_hard_cap_boundary_forward(
+    text: &str,
+    boundary: usize,
+    max_forward_lines: usize,
+) -> Option<usize> {
+    let mut next_start = boundary.min(text.len());
+    next_start = text.floor_char_boundary(next_start);
+
+    if next_start >= text.len() {
+        return None;
+    }
+
+    let mut inspected = 0usize;
+    while inspected < max_forward_lines {
+        let line_end = text[next_start..]
+            .find('\n')
+            .map(|rel| next_start + rel)
+            .unwrap_or(text.len());
+        let line = &text[next_start..line_end];
+        let trimmed = line.trim();
+
+        if !trimmed.is_empty() && !is_control_tail_or_closer_line(trimmed) {
+            return Some(next_start);
+        }
+
+        if line_end >= text.len() {
+            return None;
+        }
+
+        next_start = line_end + 1;
+        next_start = text.floor_char_boundary(next_start);
+        inspected += 1;
+    }
+
+    None
+}
+
+fn is_control_tail_or_closer_line(trimmed_line: &str) -> bool {
+    if trimmed_line.starts_with('}') {
+        return true;
+    }
+
+    matches!(trimmed_line, "break;" | "continue;" | "return;" | "throw;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,6 +1105,30 @@ mod tests {
         let text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
         let offsets = compute_marker_offsets(text);
         assert!(offsets.len() >= 3, "offsets: {:?}", offsets);
+    }
+
+    #[test]
+    fn test_compute_marker_offsets_hard_cap_nudges_past_closer_to_case_line() {
+        let text = "a1\na2\na3\na4\na5\na6\na7\na8\n}\ncase 'x': {\nbody\n";
+        let offsets = compute_marker_offsets(text);
+
+        let expected = text.find("case 'x': {").expect("case line exists");
+        assert!(
+            offsets.contains(&expected),
+            "expected nudged boundary at case line start ({expected}), got {offsets:?}"
+        );
+    }
+
+    #[test]
+    fn test_compute_marker_offsets_hard_cap_nudge_respects_max_forward_lines() {
+        let text = "a1\na2\na3\na4\na5\na6\na7\na8\n}\n}\n}\n}\n}\ncase 'x': {\nbody\n";
+        let offsets = compute_marker_offsets(text);
+
+        let case_start = text.find("case 'x': {").expect("case line exists");
+        assert!(
+            !offsets.contains(&case_start),
+            "boundary should not nudge beyond max forward lines; offsets: {offsets:?}"
+        );
     }
 
     #[test]
