@@ -825,10 +825,7 @@ mod tests {
         let mut keymap = Keymap::default();
         keymap.add_bindings(bindings);
 
-        assert_eq!(
-            keymap.bindings_for_action(&ActionAlpha {}).collect(),
-            vec![]
-        );
+        assert!(keymap.bindings_for_action(&ActionAlpha {}).next().is_none());
     }
 
     #[test]
