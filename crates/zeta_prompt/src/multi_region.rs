@@ -3,11 +3,14 @@ use anyhow::{Context as _, Result, anyhow};
 pub const MARKER_TAG_PREFIX: &str = "<|marker_";
 pub const MARKER_TAG_SUFFIX: &str = "|>";
 pub const RELATIVE_MARKER_TAG_PREFIX: &str = "<|marker";
-const MIN_BLOCK_LINES: usize = 3;
-const MAX_BLOCK_LINES: usize = 8;
+const V0316_MIN_BLOCK_LINES: usize = 3;
+const V0316_MAX_BLOCK_LINES: usize = 8;
+const V0318_MIN_BLOCK_LINES: usize = 6;
+const V0318_MAX_BLOCK_LINES: usize = 16;
 const MAX_NUDGE_LINES: usize = 5;
 pub const V0316_END_MARKER: &str = "<[end▁of▁sentence]>";
 pub const V0317_END_MARKER: &str = "<[end▁of▁sentence]>";
+pub const V0318_END_MARKER: &str = "<[end▁of▁sentence]>";
 
 pub fn marker_tag(number: usize) -> String {
     format!("{MARKER_TAG_PREFIX}{number}{MARKER_TAG_SUFFIX}")
@@ -73,8 +76,12 @@ fn skip_to_good_start(lines: &[LineInfo], from: usize) -> Option<usize> {
 /// Returns a sorted `Vec<usize>` that always starts with `0` and ends with
 /// `editable_text.len()`. Interior offsets are placed at line boundaries
 /// (right after a `\n`), preferring blank-line boundaries when available and
-/// respecting `MIN_BLOCK_LINES` / `MAX_BLOCK_LINES` constraints.
-pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
+/// respecting `min_block_lines` / `max_block_lines` constraints.
+fn compute_marker_offsets_with_limits(
+    editable_text: &str,
+    min_block_lines: usize,
+    max_block_lines: usize,
+) -> Vec<usize> {
     if editable_text.is_empty() {
         return vec![0, 0];
     }
@@ -89,13 +96,13 @@ pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
 
         // Blank-line split: non-blank line following blank line(s) with enough
         // accumulated lines.
-        if gap >= MIN_BLOCK_LINES && !lines[i].is_blank && i > 0 && lines[i - 1].is_blank {
+        if gap >= min_block_lines && !lines[i].is_blank && i > 0 && lines[i - 1].is_blank {
             let target = if lines[i].is_good_start {
                 i
             } else {
                 skip_to_good_start(&lines, i).unwrap_or(i)
             };
-            if lines.len() - target >= MIN_BLOCK_LINES
+            if lines.len() - target >= min_block_lines
                 && lines[target].start > *offsets.last().unwrap_or(&0)
             {
                 offsets.push(lines[target].start);
@@ -106,7 +113,7 @@ pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
         }
 
         // Hard cap: too many lines without a split.
-        if gap >= MAX_BLOCK_LINES {
+        if gap >= max_block_lines {
             let target = skip_to_good_start(&lines, i).unwrap_or(i);
             if lines[target].start > *offsets.last().unwrap_or(&0) {
                 offsets.push(lines[target].start);
@@ -125,6 +132,15 @@ pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
     }
 
     offsets
+}
+
+/// Compute byte offsets within `editable_text` for the V0316/V0317 block sizing rules.
+pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
+    compute_marker_offsets_with_limits(editable_text, V0316_MIN_BLOCK_LINES, V0316_MAX_BLOCK_LINES)
+}
+
+pub fn compute_marker_offsets_v0318(editable_text: &str) -> Vec<usize> {
+    compute_marker_offsets_with_limits(editable_text, V0318_MIN_BLOCK_LINES, V0318_MAX_BLOCK_LINES)
 }
 
 /// Write the editable region content with marker tags, inserting the cursor
@@ -586,6 +602,23 @@ pub fn write_editable_with_markers_v0317(
     );
 }
 
+pub fn write_editable_with_markers_v0318(
+    output: &mut String,
+    editable_text: &str,
+    cursor_offset_in_editable: usize,
+    cursor_marker: &str,
+) {
+    let marker_offsets = compute_marker_offsets_v0318(editable_text);
+    write_editable_with_markers_impl(
+        output,
+        editable_text,
+        cursor_offset_in_editable,
+        cursor_marker,
+        &marker_offsets,
+        |i| marker_tag(i + 1),
+    );
+}
+
 /// Parse byte-exact model output and reconstruct the full new editable region.
 ///
 /// `resolve_boundary` maps a parsed tag value to an absolute byte offset in
@@ -700,11 +733,47 @@ pub fn apply_marker_span_v0317(
     })
 }
 
+pub fn apply_marker_span_v0318(old_editable: &str, output: &str) -> Result<String> {
+    let tags = collect_marker_tags(output);
+
+    if tags.len() >= 2 {
+        let start_num = tags[0].value;
+        let end_num = tags[tags.len() - 1].value;
+        if start_num != end_num {
+            let expected: Vec<isize> = (start_num..=end_num).collect();
+            let actual: Vec<isize> = tags.iter().map(|t| t.value).collect();
+            if actual != expected {
+                eprintln!(
+                    "V0318 marker sequence validation failed: expected {:?}, got {:?}. Attempting best-effort parse.",
+                    expected, actual
+                );
+            }
+        }
+    }
+
+    let marker_offsets = compute_marker_offsets_v0318(old_editable);
+    apply_marker_span_impl(old_editable, &tags, output, |start_val, end_val| {
+        let start_idx = (start_val as usize)
+            .checked_sub(1)
+            .context("marker numbers are 1-indexed")?;
+        let end_idx = (end_val as usize)
+            .checked_sub(1)
+            .context("marker numbers are 1-indexed")?;
+        let start_byte = *marker_offsets
+            .get(start_idx)
+            .context("start marker number out of range")?;
+        let end_byte = *marker_offsets
+            .get(end_idx)
+            .context("end marker number out of range")?;
+        Ok((start_byte, end_byte))
+    })
+}
+
 /// Encode the training target from old and new editable text.
 ///
-/// Shared implementation for V0316 and V0317. The `tag_for_block_idx` closure
-/// maps a block index to the appropriate marker tag string. `no_edit_tag` is
-/// the marker tag to repeat when there are no edits.
+/// Shared implementation for V0316, V0317, and V0318. The `tag_for_block_idx`
+/// closure maps a block index to the appropriate marker tag string.
+/// `no_edit_tag` is the marker tag to repeat when there are no edits.
 fn encode_from_old_and_new_impl(
     old_editable: &str,
     new_editable: &str,
@@ -712,10 +781,9 @@ fn encode_from_old_and_new_impl(
     cursor_marker: &str,
     end_marker: &str,
     no_edit_tag: &str,
+    marker_offsets: &[usize],
     tag_for_block_idx: impl Fn(usize) -> String,
 ) -> Result<String> {
-    let marker_offsets = compute_marker_offsets(old_editable);
-
     if old_editable == new_editable {
         return Ok(format!("{no_edit_tag}{no_edit_tag}{end_marker}"));
     }
@@ -814,6 +882,7 @@ pub fn encode_from_old_and_new_v0316(
         cursor_marker,
         end_marker,
         &no_edit_tag,
+        &marker_offsets,
         |block_idx| marker_tag(block_idx + 1),
     )
 }
@@ -835,7 +904,29 @@ pub fn encode_from_old_and_new_v0317(
         cursor_marker,
         end_marker,
         &no_edit_tag,
+        &marker_offsets,
         |block_idx| marker_tag_relative(block_idx as isize - anchor_idx as isize),
+    )
+}
+
+pub fn encode_from_old_and_new_v0318(
+    old_editable: &str,
+    new_editable: &str,
+    cursor_offset_in_new: Option<usize>,
+    cursor_marker: &str,
+    end_marker: &str,
+) -> Result<String> {
+    let marker_offsets = compute_marker_offsets_v0318(old_editable);
+    let no_edit_tag = marker_tag(nearest_marker_number(cursor_offset_in_new, &marker_offsets));
+    encode_from_old_and_new_impl(
+        old_editable,
+        new_editable,
+        cursor_offset_in_new,
+        cursor_marker,
+        end_marker,
+        &no_edit_tag,
+        &marker_offsets,
+        |block_idx| marker_tag(block_idx + 1),
     )
 }
 
@@ -1088,7 +1179,7 @@ If you'd like to contribute, please take a look at the contributing guide.
             let block = &text[window[0]..window[1]];
             let line_count = block.lines().count();
             assert!(
-                line_count >= MIN_BLOCK_LINES,
+                line_count >= V0316_MIN_BLOCK_LINES,
                 "block too short: {line_count} lines in block {block:?} with offsets {offsets:?}"
             );
         }
@@ -1467,6 +1558,32 @@ If you'd like to contribute, please take a look at the contributing guide.
             encode_from_old_and_new_v0317(old, new, Some(5), "<|user_cursor|>", "<|end|>").unwrap();
         assert!(result.contains("<|user_cursor|>"), "result: {result}");
         assert!(result.contains("<|marker-0|>"), "result: {result}");
+    }
+
+    #[test]
+    fn test_compute_marker_offsets_v0318_uses_larger_block_sizes() {
+        let text = "l1\nl2\nl3\n\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\n";
+        let v0316_offsets = compute_marker_offsets(text);
+        let v0318_offsets = compute_marker_offsets_v0318(text);
+
+        assert!(v0318_offsets.len() < v0316_offsets.len());
+        assert_eq!(v0316_offsets.first().copied(), Some(0));
+        assert_eq!(v0318_offsets.first().copied(), Some(0));
+        assert_eq!(v0316_offsets.last().copied(), Some(text.len()));
+        assert_eq!(v0318_offsets.last().copied(), Some(text.len()));
+    }
+
+    #[test]
+    fn test_roundtrip_v0318() {
+        let old = "line1\nline2\nline3\n\nline5\nline6\nline7\nline8\nline9\nline10\n";
+        let new = "line1\nline2\nline3\n\nline5\nLINE6\nline7\nline8\nline9\nline10\n";
+        let encoded =
+            encode_from_old_and_new_v0318(old, new, None, "<|user_cursor|>", "<|end|>").unwrap();
+        let stripped = encoded
+            .strip_suffix("<|end|>")
+            .expect("should have end marker");
+        let reconstructed = apply_marker_span_v0318(old, stripped).unwrap();
+        assert_eq!(reconstructed, new);
     }
 
     #[test]
