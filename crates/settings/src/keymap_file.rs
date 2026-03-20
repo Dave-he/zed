@@ -4,7 +4,7 @@ use fs::Fs;
 use gpui::{
     Action, ActionBuildError, App, InvalidKeystrokeError, KEYSTROKE_PARSE_EXPECTED_MESSAGE,
     KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex, KeybindingKeystroke, Keystroke,
-    NoAction, SharedString, generate_list_of_all_registered_actions, register_action,
+    NoAction, SharedString, Unbind, generate_list_of_all_registered_actions, register_action,
 };
 use schemars::{JsonSchema, json_schema};
 use serde::Deserialize;
@@ -73,6 +73,10 @@ pub struct KeymapSection {
     /// on macOS. See the documentation for more details.
     #[serde(default)]
     use_key_equivalents: bool,
+    /// This keymap section's unbindings, as a JSON object mapping keystrokes to actions. These are
+    /// parsed before `bindings`, so bindings later in the same section can still take precedence.
+    #[serde(default)]
+    unbind: Option<IndexMap<String, KeymapAction>>,
     /// This keymap section's bindings, as a JSON object mapping keystrokes to actions. The
     /// keystrokes key is a string representing a sequence of keystrokes to type, where the
     /// keystrokes are separated by whitespace. Each keystroke is a sequence of modifiers (`ctrl`,
@@ -231,6 +235,7 @@ impl KeymapFile {
         for KeymapSection {
             context,
             use_key_equivalents,
+            unbind,
             bindings,
             unrecognized_fields,
         } in keymap_file.0.iter()
@@ -244,7 +249,7 @@ impl KeymapFile {
                         // Leading space is to separate from the message indicating which section
                         // the error occurred in.
                         errors.push((
-                            context,
+                            context.clone(),
                             format!(" Parse error in section `context` field: {}", err),
                         ));
                         continue;
@@ -261,6 +266,38 @@ impl KeymapFile {
                     MarkdownInlineCode(&format!("{:?}", unrecognized_fields.keys()))
                 )
                 .unwrap();
+            }
+
+            if let Some(unbind) = unbind {
+                for (keystrokes, action) in unbind {
+                    let result = Self::load_unbinding(
+                        keystrokes,
+                        action,
+                        context_predicate.clone(),
+                        *use_key_equivalents,
+                        cx,
+                    );
+                    match result {
+                        Ok(key_binding) => {
+                            key_bindings.push(key_binding);
+                        }
+                        Err(err) => {
+                            let mut lines = err.lines();
+                            let mut indented_err = lines.next().unwrap().to_string();
+                            for line in lines {
+                                indented_err.push_str("  ");
+                                indented_err.push_str(line);
+                                indented_err.push_str("\n");
+                            }
+                            write!(
+                                section_errors,
+                                "\n\n- In unbind {}, {indented_err}",
+                                MarkdownInlineCode(&format!("\"{}\"", keystrokes))
+                            )
+                            .unwrap();
+                        }
+                    }
+                }
             }
 
             if let Some(bindings) = bindings {
@@ -296,7 +333,7 @@ impl KeymapFile {
             }
 
             if !section_errors.is_empty() {
-                errors.push((context, section_errors))
+                errors.push((context.clone(), section_errors))
             }
         }
 
@@ -362,23 +399,58 @@ impl KeymapFile {
         }
     }
 
+    fn load_unbinding(
+        keystrokes: &str,
+        action: &KeymapAction,
+        context: Option<Rc<KeyBindingContextPredicate>>,
+        use_key_equivalents: bool,
+        cx: &App,
+    ) -> std::result::Result<KeyBinding, String> {
+        let key_binding =
+            Self::load_keybinding(keystrokes, action, context, use_key_equivalents, cx)?;
+
+        if key_binding.action().partial_eq(&NoAction) {
+            return Err("expected action name string or [name, input] array.".to_string());
+        }
+
+        KeyBinding::load(
+            keystrokes,
+            Box::new(Unbind(key_binding.action().name().into())),
+            key_binding.predicate(),
+            use_key_equivalents,
+            key_binding.action_input(),
+            cx.keyboard_mapper().as_ref(),
+        )
+        .map_err(|InvalidKeystrokeError { keystroke }| {
+            format!(
+                "invalid keystroke {}. {}",
+                MarkdownInlineCode(&format!("\"{}\"", &keystroke)),
+                KEYSTROKE_PARSE_EXPECTED_MESSAGE
+            )
+        })
+    }
+
     pub fn parse_action(
         action: &KeymapAction,
     ) -> Result<Option<(&String, Option<&Value>)>, String> {
-        let name_and_input = match &action.0 {
+        Self::parse_action_value(&action.0)
+    }
+
+    fn parse_action_value(action: &Value) -> Result<Option<(&String, Option<&Value>)>, String> {
+        let name_and_input = match action {
             Value::Array(items) => {
                 if items.len() != 2 {
                     return Err(format!(
                         "expected two-element array of `[name, input]`. \
                         Instead found {}.",
-                        MarkdownInlineCode(&action.0.to_string())
+                        MarkdownInlineCode(&action.to_string())
                     ));
                 }
                 let serde_json::Value::String(ref name) = items[0] else {
                     return Err(format!(
                         "expected two-element array of `[name, input]`, \
                         but the first element is not a string in {}.",
-                        MarkdownInlineCode(&action.0.to_string())
+                        MarkdownInlineCode(&action.to_string())
                     ));
                 };
                 Some((name, Some(&items[1])))
@@ -389,7 +461,7 @@ impl KeymapFile {
                 return Err(format!(
                     "expected two-element array of `[name, input]`. \
                     Instead found {}.",
-                    MarkdownInlineCode(&action.0.to_string())
+                    MarkdownInlineCode(&action.to_string())
                 ));
             }
         };
@@ -1260,13 +1332,15 @@ impl Action for ActionSequence {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{DummyKeyboardMapper, KeybindingKeystroke, Keystroke};
+    use gpui::{App, DummyKeyboardMapper, KeybindingKeystroke, Keystroke, Unbind};
     use unindent::Unindent;
 
     use crate::{
         KeybindSource, KeymapFile,
         keymap_file::{KeybindUpdateOperation, KeybindUpdateTarget},
     };
+
+    gpui::actions!(test_keymap_file, [StringAction, InputAction]);
 
     #[test]
     fn can_deserialize_keymap_with_trailing_comma() {
@@ -1281,6 +1355,60 @@ mod tests {
                   "
         };
         KeymapFile::parse(json).unwrap();
+    }
+
+    #[gpui::test]
+    fn keymap_section_unbinds_are_loaded_before_bindings(cx: &mut App) {
+        let key_bindings = match KeymapFile::load(
+            indoc::indoc! {r#"
+                [
+                    {
+                        "unbind": {
+                            "ctrl-a": "test_keymap_file::StringAction",
+                            "ctrl-b": ["test_keymap_file::InputAction", {}]
+                        },
+                        "bindings": {
+                            "ctrl-c": "test_keymap_file::StringAction"
+                        }
+                    }
+                ]
+            "#},
+            cx,
+        ) {
+            crate::keymap_file::KeymapFileLoadResult::Success { key_bindings } => key_bindings,
+            crate::keymap_file::KeymapFileLoadResult::SomeFailedToLoad {
+                error_message, ..
+            } => {
+                panic!("{error_message}");
+            }
+            crate::keymap_file::KeymapFileLoadResult::JsonParseFailure { error } => {
+                panic!("JSON parse error: {error}");
+            }
+        };
+
+        assert_eq!(key_bindings.len(), 3);
+        assert!(
+            key_bindings[0]
+                .action()
+                .partial_eq(&Unbind("test_keymap_file::StringAction".into()))
+        );
+        assert_eq!(key_bindings[0].action_input(), None);
+        assert!(
+            key_bindings[1]
+                .action()
+                .partial_eq(&Unbind("test_keymap_file::InputAction".into()))
+        );
+        assert_eq!(
+            key_bindings[1]
+                .action_input()
+                .as_ref()
+                .map(ToString::to_string),
+            Some("{}".to_string())
+        );
+        assert_eq!(
+            key_bindings[2].action().name(),
+            "test_keymap_file::StringAction"
+        );
     }
 
     #[track_caller]
