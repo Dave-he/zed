@@ -2856,6 +2856,87 @@ mod internal_tests {
         });
     }
 
+    #[gpui::test]
+    async fn test_close_session_saves_thread(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/",
+            json!({
+                "a": {
+                    "file.txt": "hello"
+                }
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let agent = cx.update(|cx| {
+            NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
+        });
+        let connection = Rc::new(NativeAgentConnection(agent.clone()));
+
+        let acp_thread = cx
+            .update(|cx| {
+                connection
+                    .clone()
+                    .new_session(project.clone(), PathList::new(&[Path::new("")]), cx)
+            })
+            .await
+            .unwrap();
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = agent.read_with(cx, |agent, _| {
+            agent.sessions.get(&session_id).unwrap().thread.clone()
+        });
+
+        let model = Arc::new(FakeLanguageModel::default());
+        thread.update(cx, |thread, cx| {
+            thread.set_model(model.clone(), cx);
+        });
+
+        // Send a message so the thread is non-empty (empty threads aren't saved).
+        let send = acp_thread.update(cx, |thread, cx| thread.send(vec!["hello".into()], cx));
+        let send = cx.foreground_executor().spawn(send);
+        cx.run_until_parked();
+
+        model.send_last_completion_stream_text_chunk("world");
+        model.end_last_completion_stream();
+        send.await.unwrap();
+        cx.run_until_parked();
+
+        // Set a draft prompt WITHOUT calling run_until_parked afterwards.
+        // This means no observe-triggered save has run for this change.
+        // The only way this data gets persisted is if close_session
+        // itself performs the save.
+        let draft_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+            "unsaved draft",
+        ))];
+        acp_thread.update(cx, |thread, _cx| {
+            thread.set_draft_prompt(Some(draft_blocks.clone()));
+        });
+
+        // Close the session immediately — no run_until_parked in between.
+        cx.update(|cx| connection.clone().close_session(&session_id, cx))
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        // Reopen and verify the draft prompt was saved.
+        let reloaded = agent
+            .update(cx, |agent, cx| {
+                agent.open_thread(session_id.clone(), project.clone(), cx)
+            })
+            .await
+            .unwrap();
+        reloaded.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread.draft_prompt(),
+                Some(draft_blocks.as_slice()),
+                "close_session must save the thread; draft prompt was lost"
+            );
+        });
+    }
+
     fn thread_entries(
         thread_store: &Entity<ThreadStore>,
         cx: &mut TestAppContext,
