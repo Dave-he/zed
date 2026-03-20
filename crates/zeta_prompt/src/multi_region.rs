@@ -38,8 +38,21 @@ pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
     let mut offsets = vec![0usize];
     let mut lines_since_last_marker = 0usize;
     let mut byte_offset = 0usize;
+    let mut last_boundary_line_end = 0usize;
+    let mut pending_boundary = None;
 
     for line in editable_text.split('\n') {
+        if let Some(boundary) = pending_boundary {
+            if byte_offset >= boundary {
+                if *offsets.last().unwrap_or(&0) != boundary {
+                    offsets.push(boundary);
+                }
+                last_boundary_line_end = boundary;
+                lines_since_last_marker = 0;
+                pending_boundary = None;
+            }
+        }
+
         let line_end = byte_offset + line.len() + 1;
         let is_past_end = line_end > editable_text.len();
         let actual_line_end = line_end.min(editable_text.len());
@@ -54,12 +67,21 @@ pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
             } else if lines_since_last_marker >= MAX_BLOCK_LINES {
                 let boundary = nudge_hard_cap_boundary_forward(
                     editable_text,
+                    byte_offset,
                     actual_line_end,
                     HARD_CAP_BOUNDARY_MAX_FORWARD_LINES,
                 )
                 .unwrap_or(actual_line_end);
-                offsets.push(boundary);
-                lines_since_last_marker = 0;
+                let last_emitted_or_pending = pending_boundary.unwrap_or(last_boundary_line_end);
+                if boundary > last_emitted_or_pending {
+                    if boundary <= byte_offset {
+                        offsets.push(boundary);
+                        last_boundary_line_end = boundary;
+                        lines_since_last_marker = 0;
+                    } else {
+                        pending_boundary = Some(boundary);
+                    }
+                }
             }
         }
 
@@ -78,9 +100,25 @@ pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
                 })
                 .unwrap_or(false);
 
-            if has_preceding_blank_line {
-                offsets.push(byte_offset);
-                lines_since_last_marker = 1;
+            if has_preceding_blank_line
+                && byte_offset >= pending_boundary.unwrap_or(last_boundary_line_end)
+            {
+                let remaining_text = &editable_text[byte_offset..];
+                let remaining_lines = remaining_text
+                    .as_bytes()
+                    .iter()
+                    .filter(|&&byte| byte == b'\n')
+                    .count();
+
+                if remaining_lines >= MIN_BLOCK_LINES {
+                    offsets.push(byte_offset);
+                    let segment = &editable_text
+                        [pending_boundary.unwrap_or(last_boundary_line_end)..byte_offset];
+                    let line_count = segment.as_bytes().iter().filter(|&&b| b == b'\n').count();
+                    lines_since_last_marker = line_count.max(1);
+                    last_boundary_line_end = byte_offset;
+                    pending_boundary = None;
+                }
             }
         }
 
@@ -91,14 +129,27 @@ pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
         if !is_past_end && lines_since_last_marker >= MAX_BLOCK_LINES {
             let boundary = nudge_hard_cap_boundary_forward(
                 editable_text,
+                byte_offset,
                 actual_line_end,
                 HARD_CAP_BOUNDARY_MAX_FORWARD_LINES,
             )
             .unwrap_or(actual_line_end);
-            if *offsets.last().unwrap_or(&0) != boundary {
-                offsets.push(boundary);
-                lines_since_last_marker = 0;
+            let last_emitted_or_pending = pending_boundary.unwrap_or(last_boundary_line_end);
+            if boundary > last_emitted_or_pending {
+                if boundary <= byte_offset {
+                    offsets.push(boundary);
+                    last_boundary_line_end = boundary;
+                    lines_since_last_marker = 0;
+                } else {
+                    pending_boundary = Some(boundary);
+                }
             }
+        }
+    }
+
+    if let Some(boundary) = pending_boundary {
+        if *offsets.last().unwrap_or(&0) != boundary {
+            offsets.push(boundary);
         }
     }
 
@@ -1037,10 +1088,11 @@ fn snap_to_line_start(text: &str, offset: usize) -> usize {
 
 fn nudge_hard_cap_boundary_forward(
     text: &str,
+    current_line_start: usize,
     boundary: usize,
     max_forward_lines: usize,
 ) -> Option<usize> {
-    let mut next_start = boundary.min(text.len());
+    let mut next_start = boundary.max(current_line_start).min(text.len());
     next_start = text.floor_char_boundary(next_start);
 
     if next_start >= text.len() {
@@ -1073,11 +1125,14 @@ fn nudge_hard_cap_boundary_forward(
 }
 
 fn is_control_tail_or_closer_line(trimmed_line: &str) -> bool {
-    if trimmed_line.starts_with('}') {
+    if trimmed_line.starts_with(&['}', ']', ')']) {
         return true;
     }
 
-    matches!(trimmed_line, "break;" | "continue;" | "return;" | "throw;")
+    matches!(
+        trimmed_line.trim_end_matches(';'),
+        "break" | "continue" | "return" | "throw"
+    )
 }
 
 #[cfg(test)]
@@ -1128,6 +1183,42 @@ mod tests {
         assert!(
             !offsets.contains(&case_start),
             "boundary should not nudge beyond max forward lines; offsets: {offsets:?}"
+        );
+    }
+
+    #[test]
+    fn test_compute_marker_offsets_stay_sorted_when_hard_cap_boundary_nudges_forward() {
+        let text = "\
+aaaaaaaaaa = 1;
+bbbbbbbbbb = 2;
+cccccccccc = 3;
+dddddddddd = 4;
+eeeeeeeeee = 5;
+ffffffffff = 6;
+gggggggggg = 7;
+hhhhhhhhhh = 8;
+          };
+        };
+
+        grafanaDashboards = {
+          cluster-overview.spec = {
+            inherit instanceSelector;
+            folderRef = \"infrastructure\";
+            json = builtins.readFile ./grafana/dashboards/cluster-overview.json;
+          };
+        };
+";
+        let offsets = compute_marker_offsets(text);
+
+        assert_eq!(offsets.first().copied(), Some(0), "offsets: {offsets:?}");
+        assert_eq!(
+            offsets.last().copied(),
+            Some(text.len()),
+            "offsets: {offsets:?}"
+        );
+        assert!(
+            offsets.windows(2).all(|window| window[0] <= window[1]),
+            "offsets must be sorted: {offsets:?}"
         );
     }
 
