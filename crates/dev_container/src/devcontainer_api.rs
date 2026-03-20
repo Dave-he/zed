@@ -5,17 +5,11 @@ use std::{
     sync::Arc,
 };
 
-use futures::{TryFutureExt, future::err};
+use futures::TryFutureExt;
 use gpui::{AsyncWindowContext, Entity};
-use http::Request;
-use http_client::AsyncBody;
-use node_runtime::NodeRuntime;
 use project::Worktree;
 use serde::Deserialize;
 use settings::{DevContainerConnection, infer_json_indent_size, replace_value_in_json_text};
-use smol::fs::{self, File};
-use ui::Window;
-use util::command::Command;
 use util::rel_path::RelPath;
 use walkdir::WalkDir;
 use workspace::Workspace;
@@ -65,52 +59,9 @@ pub(crate) struct DevContainerUp {
     pub(crate) extension_ids: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DevContainerApply {
-    pub(crate) files: Vec<String>,
-}
-
 #[derive(Debug)]
 pub(crate) struct DevContainerApplyV2 {
     pub(crate) project_files: Vec<Arc<RelPath>>,
-}
-
-// Keep around for posterity for now
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct _DevContainerConfiguration {
-    name: Option<String>,
-}
-
-// Keep around for posterity for now
-#[derive(Debug, Deserialize)]
-pub(crate) struct _DevContainerConfigurationOutput {
-    configuration: _DevContainerConfiguration,
-}
-
-pub(crate) struct DevContainerCli {
-    pub path: PathBuf,
-    node_runtime_path: Option<PathBuf>,
-}
-
-impl DevContainerCli {
-    fn command(&self, use_podman: bool) -> Command {
-        let mut command = if let Some(node_runtime_path) = &self.node_runtime_path {
-            let mut command =
-                util::command::new_command(node_runtime_path.as_os_str().display().to_string());
-            command.arg(self.path.display().to_string());
-            command
-        } else {
-            util::command::new_command(self.path.display().to_string())
-        };
-
-        if use_podman {
-            command.arg("--docker-path");
-            command.arg("podman");
-        }
-        command
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,20 +308,6 @@ pub async fn start_dev_container_with_config(
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn dev_container_cli() -> String {
-    "devcontainer".to_string()
-}
-
-#[cfg(target_os = "windows")]
-fn dev_container_cli() -> String {
-    "devcontainer.cmd".to_string()
-}
-
-fn dev_container_script() -> String {
-    "devcontainer.js".to_string()
-}
-
 async fn check_for_docker(use_podman: bool) -> Result<(), DevContainerError> {
     let mut command = if use_podman {
         util::command::new_command("podman")
@@ -384,184 +321,6 @@ async fn check_for_docker(use_podman: bool) -> Result<(), DevContainerError> {
         Err(e) => {
             log::error!("Unable to find docker in $PATH: {:?}", e);
             Err(DevContainerError::DockerNotAvailable)
-        }
-    }
-}
-
-pub(crate) async fn ensure_devcontainer_cli(
-    node_runtime: &NodeRuntime,
-) -> Result<DevContainerCli, DevContainerError> {
-    let mut command = util::command::new_command(&dev_container_cli());
-    command.arg("--version");
-
-    if let Err(e) = command.output().await {
-        log::error!(
-            "Unable to find devcontainer CLI in $PATH. Checking for a zed installed version. Error: {:?}",
-            e
-        );
-
-        let Ok(node_runtime_path) = node_runtime.binary_path().await else {
-            return Err(DevContainerError::NodeRuntimeNotAvailable);
-        };
-
-        let datadir_cli_path = paths::devcontainer_dir()
-            .join("node_modules")
-            .join("@devcontainers")
-            .join("cli")
-            .join(&dev_container_script());
-
-        log::debug!(
-            "devcontainer not found in path, using local location: ${}",
-            datadir_cli_path.display()
-        );
-
-        let mut command =
-            util::command::new_command(node_runtime_path.as_os_str().display().to_string());
-        command.arg(datadir_cli_path.display().to_string());
-        command.arg("--version");
-
-        match command.output().await {
-            Err(e) => log::error!(
-                "Unable to find devcontainer CLI in Data dir. Will try to install. Error: {:?}",
-                e
-            ),
-            Ok(output) => {
-                if output.status.success() {
-                    log::info!("Found devcontainer CLI in Data dir");
-                    return Ok(DevContainerCli {
-                        path: datadir_cli_path.clone(),
-                        node_runtime_path: Some(node_runtime_path.clone()),
-                    });
-                } else {
-                    log::error!(
-                        "Could not run devcontainer CLI from data_dir. Will try once more to install. Output: {:?}",
-                        output
-                    );
-                }
-            }
-        }
-
-        if let Err(e) = fs::create_dir_all(paths::devcontainer_dir()).await {
-            log::error!("Unable to create devcontainer directory. Error: {:?}", e);
-            return Err(DevContainerError::DevContainerCliNotAvailable);
-        }
-
-        if let Err(e) = node_runtime
-            .npm_install_packages(
-                &paths::devcontainer_dir(),
-                &[("@devcontainers/cli", "latest")],
-            )
-            .await
-        {
-            log::error!(
-                "Unable to install devcontainer CLI to data directory. Error: {:?}",
-                e
-            );
-            return Err(DevContainerError::DevContainerCliNotAvailable);
-        };
-
-        let mut command =
-            util::command::new_command(node_runtime_path.as_os_str().display().to_string());
-        command.arg(datadir_cli_path.display().to_string());
-        command.arg("--version");
-        if let Err(e) = command.output().await {
-            log::error!(
-                "Unable to find devcontainer cli after NPM install. Error: {:?}",
-                e
-            );
-            Err(DevContainerError::DevContainerCliNotAvailable)
-        } else {
-            Ok(DevContainerCli {
-                path: datadir_cli_path,
-                node_runtime_path: Some(node_runtime_path),
-            })
-        }
-    } else {
-        log::info!("Found devcontainer cli on $PATH, using it");
-        Ok(DevContainerCli {
-            path: PathBuf::from(&dev_container_cli()),
-            node_runtime_path: None,
-        })
-    }
-}
-
-// Keeping this around for reference but should delete (or wrap the underlying docker work)
-async fn _devcontainer_up(
-    context: &DevContainerContext,
-    cli: &DevContainerCli,
-    config_path: Option<&Path>,
-) -> Result<DevContainerUp, DevContainerError> {
-    let mut command = cli.command(context.use_podman);
-    command.arg("up");
-    command.arg("--workspace-folder");
-    command.arg(context.project_directory.display().to_string());
-
-    if let Some(config) = config_path {
-        command.arg("--config");
-        command.arg(config.display().to_string());
-    }
-
-    log::info!("Running full devcontainer up command: {:?}", command);
-
-    match command.output().await {
-        Ok(output) => {
-            if output.status.success() {
-                let raw = String::from_utf8_lossy(&output.stdout);
-                parse_json_from_cli(&raw)
-            } else {
-                let message = format!(
-                    "Non-success status running devcontainer up for workspace: out: {}, err: {}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-
-                log::error!("{}", &message);
-                Err(DevContainerError::DevContainerUpFailed(message))
-            }
-        }
-        Err(e) => {
-            let message = format!("Error running devcontainer up: {:?}", e);
-            log::error!("{}", &message);
-            Err(DevContainerError::DevContainerUpFailed(message))
-        }
-    }
-}
-
-// Keeping for posterity
-pub(crate) async fn _read_devcontainer_configuration(
-    context: &DevContainerContext,
-    cli: &DevContainerCli,
-    config_path: Option<&Path>,
-) -> Result<_DevContainerConfigurationOutput, DevContainerError> {
-    let mut command = cli.command(context.use_podman);
-    command.arg("read-configuration");
-    command.arg("--workspace-folder");
-    command.arg(context.project_directory.display().to_string());
-
-    if let Some(config) = config_path {
-        command.arg("--config");
-        command.arg(config.display().to_string());
-    }
-
-    match command.output().await {
-        Ok(output) => {
-            if output.status.success() {
-                let raw = String::from_utf8_lossy(&output.stdout);
-                parse_json_from_cli(&raw)
-            } else {
-                let message = format!(
-                    "Non-success status running devcontainer read-configuration for workspace: out: {:?}, err: {:?}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                log::error!("{}", &message);
-                Err(DevContainerError::DevContainerNotFound)
-            }
-        }
-        Err(e) => {
-            let message = format!("Error running devcontainer read-configuration: {:?}", e);
-            log::error!("{}", &message);
-            Err(DevContainerError::DevContainerNotFound)
         }
     }
 }
@@ -611,7 +370,7 @@ pub(crate) async fn apply_dev_container_template_v2(
         .join(format!("extracted-{timestamp}"));
 
     context.fs.create_dir(&extract_dir).await.map_err(|e| {
-        log::error!("Could not create temporary directory");
+        log::error!("Could not create temporary directory: {e}");
         DevContainerError::DevContainerParseFailed // TODO
     })?;
 
@@ -722,88 +481,6 @@ fn expand_template_options(content: String, template_options: &HashMap<String, S
     replaced_content
 }
 
-// This will probably be the hardest
-pub(crate) async fn apply_dev_container_template(
-    template: &DevContainerTemplate,
-    template_options: &HashMap<String, String>,
-    features_selected: &HashSet<DevContainerFeature>,
-    context: &DevContainerContext,
-    cli: &DevContainerCli,
-) -> Result<DevContainerApply, DevContainerError> {
-    let mut command = cli.command(context.use_podman);
-
-    let Ok(serialized_options) = serde_json_lenient::to_string(template_options) else {
-        log::error!("Unable to serialize options for {:?}", template_options);
-        return Err(DevContainerError::DevContainerParseFailed);
-    };
-
-    command.arg("templates");
-    command.arg("apply");
-    command.arg("--workspace-folder");
-    command.arg(context.project_directory.display().to_string());
-    command.arg("--template-id");
-    command.arg(format!(
-        "{}/{}",
-        template
-            .source_repository
-            .as_ref()
-            .unwrap_or(&String::from("")),
-        template.id
-    ));
-    command.arg("--template-args");
-    command.arg(serialized_options);
-    command.arg("--features");
-    command.arg(template_features_to_json(features_selected));
-
-    log::debug!("Running full devcontainer apply command: {:?}", command);
-
-    match command.output().await {
-        Ok(output) => {
-            if output.status.success() {
-                let raw = String::from_utf8_lossy(&output.stdout);
-                parse_json_from_cli(&raw)
-            } else {
-                let message = format!(
-                    "Non-success status running devcontainer templates apply for workspace: out: {:?}, err: {:?}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-
-                log::error!("{}", &message);
-                Err(DevContainerError::DevContainerTemplateApplyFailed(message))
-            }
-        }
-        Err(e) => {
-            let message = format!("Error running devcontainer templates apply: {:?}", e);
-            log::error!("{}", &message);
-            Err(DevContainerError::DevContainerTemplateApplyFailed(message))
-        }
-    }
-}
-// Try to parse directly first (newer versions output pure JSON)
-// If that fails, look for JSON start (older versions have plaintext prefix)
-fn parse_json_from_cli<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, DevContainerError> {
-    serde_json_lenient::from_str::<T>(&raw)
-        .or_else(|e| {
-            log::error!("Error parsing json: {} - will try to find json object in larger plaintext", e);
-            let json_start = raw
-                .find(|c| c == '{')
-                .ok_or_else(|| {
-                    log::error!("No JSON found in devcontainer up output");
-                    DevContainerError::DevContainerParseFailed
-                })?;
-
-            serde_json_lenient::from_str(&raw[json_start..]).map_err(|e| {
-                log::error!(
-                    "Unable to parse JSON from devcontainer up output (starting at position {}), error: {:?}",
-                    json_start,
-                    e
-                );
-                DevContainerError::DevContainerParseFailed
-            })
-        })
-}
-
 fn get_backup_project_name(remote_workspace_folder: &str, container_id: &str) -> String {
     Path::new(remote_workspace_folder)
         .file_name()
@@ -812,36 +489,11 @@ fn get_backup_project_name(remote_workspace_folder: &str, container_id: &str) ->
         .unwrap_or_else(|| container_id.to_string())
 }
 
-fn template_features_to_json(features_selected: &HashSet<DevContainerFeature>) -> String {
-    let features_map = features_selected
-        .iter()
-        .map(|feature| {
-            let mut map = HashMap::new();
-            map.insert(
-                "id",
-                format!(
-                    "{}/{}:{}",
-                    feature
-                        .source_repository
-                        .as_ref()
-                        .unwrap_or(&String::from("")),
-                    feature.id,
-                    feature.major_version()
-                ),
-            );
-            map
-        })
-        .collect::<Vec<HashMap<&str, String>>>();
-    serde_json_lenient::to_string(&features_map).unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use crate::devcontainer_api::{
-        DevContainerConfig, DevContainerUp, find_configs_in_snapshot, parse_json_from_cli,
-    };
+    use crate::devcontainer_api::{DevContainerConfig, find_configs_in_snapshot};
     use fs::FakeFs;
     use gpui::TestAppContext;
     use project::Project;
@@ -854,31 +506,6 @@ mod tests {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
         });
-    }
-
-    #[test]
-    // This test is no longer valid
-    fn should_parse_from_devcontainer_json() {
-        let json = r#"{"outcome":"success","containerId":"826abcac45afd412abff083ab30793daff2f3c8ce2c831df728baf39933cb37a","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/zed"}"#;
-        let up: DevContainerUp = parse_json_from_cli(json).unwrap();
-        assert_eq!(up._outcome, "success");
-        assert_eq!(
-            up.container_id,
-            "826abcac45afd412abff083ab30793daff2f3c8ce2c831df728baf39933cb37a"
-        );
-        assert_eq!(up.remote_user, "vscode");
-        assert_eq!(up.remote_workspace_folder, "/workspaces/zed");
-
-        let json_in_plaintext = r#"[2026-01-22T16:19:08.802Z] @devcontainers/cli 0.80.1. Node.js v22.21.1. darwin 24.6.0 arm64.
-            {"outcome":"success","containerId":"826abcac45afd412abff083ab30793daff2f3c8ce2c831df728baf39933cb37a","remoteUser":"vscode","remoteWorkspaceFolder":"/workspaces/zed"}"#;
-        let up: DevContainerUp = parse_json_from_cli(json_in_plaintext).unwrap();
-        assert_eq!(up._outcome, "success");
-        assert_eq!(
-            up.container_id,
-            "826abcac45afd412abff083ab30793daff2f3c8ce2c831df728baf39933cb37a"
-        );
-        assert_eq!(up.remote_user, "vscode");
-        assert_eq!(up.remote_workspace_folder, "/workspaces/zed");
     }
 
     #[gpui::test]

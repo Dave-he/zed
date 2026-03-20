@@ -1,6 +1,5 @@
 use std::{path::PathBuf, pin::Pin, sync::Arc};
 
-use async_tar::Archive;
 use fs::Fs;
 use futures::{AsyncRead, AsyncReadExt, io::BufReader};
 use http::Request;

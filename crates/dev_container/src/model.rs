@@ -8,7 +8,6 @@ use std::{
 
 use fs::Fs;
 use http_client::HttpClient;
-use project::debugger::session::OutputToken;
 use serde::{Deserialize, Serialize};
 use smol::process::Command;
 use util::ResultExt;
@@ -226,6 +225,57 @@ impl DevContainerManifest {
         format!("{}-{:x}-features", prefix, hash)
     }
 
+    /// Gets the base image from the devcontainer with the following precedence:
+    /// - The devcontainer image if an image is specified
+    /// - The image sourced in the Dockerfile if a Dockerfile is specified
+    /// - The image sourced in the docker-compose main service, if one is specified
+    /// - The image sourced in the docker-compose main service dockerfile, if one is specified
+    /// If no such image is available, return an error
+    async fn get_base_image_from_config(&self) -> Result<String, DevContainerErrorV2> {
+        if let Some(image) = &self.dev_container().image {
+            return Ok(image.to_string());
+        }
+        if let Some(dockerfile) = self.dev_container().build.as_ref().map(|b| &b.dockerfile) {
+            let dockerfile_contents = self
+                .fs
+                .load(&self.config_directory.join(dockerfile))
+                .await
+                .map_err(|e| {
+                    log::error!("Error reading dockerfile: {e}");
+                    DevContainerErrorV2::UnmappedError
+                })?;
+            return image_from_dockerfile(self, dockerfile_contents);
+        }
+        if self.dev_container().docker_compose_file.is_some() {
+            let docker_compose_manifest = self.docker_compose_manifest().await?;
+            let (_, main_service) = find_primary_service(&docker_compose_manifest, &self)?;
+
+            if let Some(dockerfile) = main_service
+                .build
+                .as_ref()
+                .and_then(|b| b.dockerfile.as_ref())
+            {
+                let dockerfile_contents = self
+                    .fs
+                    .load(&self.config_directory.join(dockerfile))
+                    .await
+                    .map_err(|e| {
+                        log::error!("Error reading dockerfile: {e}");
+                        DevContainerErrorV2::UnmappedError
+                    })?;
+                return image_from_dockerfile(self, dockerfile_contents);
+            }
+            if let Some(image) = &main_service.image {
+                return Ok(image.to_string());
+            }
+
+            log::error!("No valid base image found in docker-compose configuration");
+            return Err(DevContainerErrorV2::UnmappedError);
+        }
+        log::error!("No valid base image found in dev container configuration");
+        Err(DevContainerErrorV2::UnmappedError)
+    }
+
     async fn download_feature_and_dockerfile_resources(
         &mut self,
     ) -> Result<(), DevContainerErrorV2> {
@@ -238,7 +288,7 @@ impl DevContainerManifest {
             }
             ConfigStatus::VariableParsed(dev_container) => dev_container,
         };
-        let root_image_tag = get_base_image_from_config(self).await?;
+        let root_image_tag = self.get_base_image_from_config().await?;
 
         let root_image = inspect_image(&root_image_tag).await?;
 
@@ -403,7 +453,7 @@ impl DevContainerManifest {
                 return Err(DevContainerErrorV2::UnmappedError);
             }
 
-            let contents = std::fs::read_to_string(&feature_json_path).map_err(|e| {
+            let contents = self.fs.load(&feature_json_path).await.map_err(|e| {
                 log::error!("error reading devcontainer-feature.json: {:?}", e);
                 DevContainerErrorV2::UnmappedError
             })?;
@@ -418,7 +468,9 @@ impl DevContainerManifest {
 
             log::info!("Downloaded OCI feature content for '{}'", feature_ref);
 
-            let env_content = feature_manifest.write_feature_env(options)?;
+            let env_content = feature_manifest
+                .write_feature_env(&self.fs, options)
+                .await?;
 
             let wrapper_content = generate_install_wrapper(feature_ref, feature_id, &env_content);
 
@@ -541,7 +593,7 @@ impl DevContainerManifest {
         &self,
         build_resources: DevContainerBuildResources,
     ) -> Result<DevContainerUp, DevContainerErrorV2> {
-        let ConfigStatus::VariableParsed(config) = &self.config else {
+        let ConfigStatus::VariableParsed(_) = &self.config else {
             log::error!(
                 "Variables have not been parsed; cannot proceed with running the dev container"
             );
@@ -1880,62 +1932,6 @@ fn create_docker_query_containers(
     Ok(command)
 }
 
-/// Gets the base image from the devcontainer with the following precedence:
-/// - The devcontainer image if an image is specified
-/// - The image sourced in the Dockerfile if a Dockerfile is specified
-/// - The image sourced in the docker-compose main service, if one is specified
-/// - The image sourced in the docker-compose main service dockerfile, if one is specified
-/// If no such image is available, return an error
-async fn get_base_image_from_config(
-    devcontainer: &DevContainerManifest,
-) -> Result<String, DevContainerErrorV2> {
-    if let Some(image) = &devcontainer.dev_container().image {
-        return Ok(image.to_string());
-    }
-    if let Some(dockerfile) = devcontainer
-        .dev_container()
-        .build
-        .as_ref()
-        .map(|b| &b.dockerfile)
-    {
-        let dockerfile_contents = std::fs::read_to_string(
-            devcontainer.config_directory.join(dockerfile),
-        )
-        .map_err(|e| {
-            log::error!("Error reading dockerfile: {e}");
-            DevContainerErrorV2::UnmappedError
-        })?;
-        return image_from_dockerfile(devcontainer, dockerfile_contents);
-    }
-    if devcontainer.dev_container().docker_compose_file.is_some() {
-        let docker_compose_manifest = devcontainer.docker_compose_manifest().await?;
-        let (_, main_service) = find_primary_service(&docker_compose_manifest, &devcontainer)?;
-
-        if let Some(dockerfile) = main_service
-            .build
-            .as_ref()
-            .and_then(|b| b.dockerfile.as_ref())
-        {
-            let dockerfile_contents = std::fs::read_to_string(
-                devcontainer.config_directory.join(dockerfile),
-            )
-            .map_err(|e| {
-                log::error!("Error reading dockerfile: {e}");
-                DevContainerErrorV2::UnmappedError
-            })?;
-            return image_from_dockerfile(devcontainer, dockerfile_contents);
-        }
-        if let Some(image) = &main_service.image {
-            return Ok(image.to_string());
-        }
-
-        log::error!("No valid base image found in docker-compose configuration");
-        return Err(DevContainerErrorV2::UnmappedError);
-    }
-    log::error!("No valid base image found in dev container configuration");
-    Err(DevContainerErrorV2::UnmappedError)
-}
-
 /// TODO test
 fn image_from_dockerfile(
     devcontainer: &DevContainerManifest,
@@ -2021,7 +2017,7 @@ fn get_container_user_from_config(
 
 #[cfg(test)]
 mod test {
-    use std::{collections::HashMap, ffi::OsStr, path::PathBuf, sync::Arc};
+    use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
     use fs::FakeFs;
     use gpui::TestAppContext;

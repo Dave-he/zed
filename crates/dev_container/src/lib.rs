@@ -1,20 +1,15 @@
 use std::path::Path;
-use std::path::PathBuf;
 
 use fs::Fs;
 use gpui::AppContext;
-use gpui::AsyncWindowContext;
 use gpui::Entity;
 use gpui::Task;
 use http_client::anyhow;
 use picker::Picker;
 use picker::PickerDelegate;
 use project::ProjectEnvironment;
-use project::Worktree;
 use settings::RegisterSetting;
 use settings::Settings;
-use smol::fs::File;
-use smol::process::Command;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -32,9 +27,7 @@ use ui::Tooltip;
 use ui::h_flex;
 use ui::rems_from_px;
 use ui::v_flex;
-use util::TryFutureExt;
 use util::shell::Shell;
-use walkdir::WalkDir;
 
 use gpui::{Action, DismissEvent, EventEmitter, FocusHandle, Focusable, RenderOnce, WeakEntity};
 use serde::Deserialize;
@@ -47,9 +40,7 @@ use util::ResultExt;
 use util::rel_path::RelPath;
 use workspace::{ModalView, Workspace, with_active_or_new_workspace};
 
-use futures::AsyncReadExt;
-use http::Request;
-use http_client::{AsyncBody, HttpClient};
+use http_client::HttpClient;
 
 mod command_json;
 mod devcontainer_api;
@@ -59,7 +50,6 @@ mod features;
 mod model;
 mod oci;
 
-use devcontainer_api::ensure_devcontainer_cli;
 use devcontainer_api::read_default_devcontainer_configuration;
 
 use crate::devcontainer_api::DevContainerError;
@@ -125,7 +115,6 @@ fn get_safe_id(input: &str) -> String {
 pub struct DevContainerContext {
     pub project_directory: Arc<Path>,
     pub use_podman: bool,
-    pub node_runtime: node_runtime::NodeRuntime,
     pub fs: Arc<dyn Fs>,
     pub http_client: Arc<dyn HttpClient>,
     pub environment: Entity<ProjectEnvironment>,
@@ -135,14 +124,12 @@ impl DevContainerContext {
     pub fn from_workspace(workspace: &Workspace, cx: &App) -> Option<Self> {
         let project_directory = workspace.project().read(cx).active_project_directory(cx)?;
         let use_podman = DevContainerSettings::get_global(cx).use_podman;
-        let node_runtime = workspace.app_state().node_runtime.clone();
         let http_client = cx.http_client().clone();
         let fs = workspace.app_state().fs.clone();
         let environment = workspace.project().read(cx).environment();
         Some(Self {
             project_directory,
             use_podman,
-            node_runtime,
             fs,
             http_client,
             environment: environment.clone(),
@@ -1546,20 +1533,6 @@ fn dispatch_apply_templates(
             return;
         };
 
-        let Ok(cli) = ensure_devcontainer_cli(&context.node_runtime).await else {
-            this.update_in(cx, |this, window, cx| {
-                this.accept_message(
-                    DevContainerMessage::FailedToWriteTemplate(
-                        DevContainerError::DevContainerCliNotAvailable,
-                    ),
-                    window,
-                    cx,
-                );
-            })
-            .log_err();
-            return;
-        };
-
         let environment = context.environment(cx).await;
 
         {
@@ -1583,7 +1556,7 @@ fn dispatch_apply_templates(
                 workspace.project().read(cx).worktree_for_id(tree_id, cx)
             });
 
-            let files = apply_dev_container_template_v2(
+            let files = match apply_dev_container_template_v2(
                 worktree.unwrap(),
                 &template_entry.template,
                 &template_entry.options_selected,
@@ -1592,7 +1565,22 @@ fn dispatch_apply_templates(
                 cx,
             )
             .await
-            .unwrap();
+            {
+                Ok(files) => files,
+                Err(e) => {
+                    this.update_in(cx, |this, window, cx| {
+                        this.accept_message(
+                            DevContainerMessage::FailedToWriteTemplate(
+                                DevContainerError::DevContainerTemplateApplyFailed(e.to_string()),
+                            ),
+                            window,
+                            cx,
+                        );
+                    })
+                    .ok();
+                    return;
+                }
+            };
 
             if files.project_files.contains(&Arc::from(
                 RelPath::unix(".devcontainer/devcontainer.json").unwrap(), // TOOD unwrap
@@ -1695,82 +1683,6 @@ async fn get_ghcr_features(
         ));
     }
     Ok(features_response)
-}
-
-// This got inlined but keeping it around for a sec
-pub(crate) async fn download_devcontainer_template_files(
-    id: &str,
-    token: &str,
-    blob_digest: &str,
-    client: &Arc<dyn HttpClient>,
-    worktree: Entity<Worktree>,
-    cx: &mut AsyncWindowContext,
-) -> Result<PathBuf, DevContainerErrorV2> {
-    let url = format!(
-        "https://{}/v2/{}/{}/blobs/{}",
-        ghcr_registry(),
-        devcontainer_templates_repository(),
-        id,
-        blob_digest
-    );
-    dbg!(&url, token);
-    let request = Request::get(url)
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Accept", "application/vnd.oci.image.manifest.v1+json")
-        .body(AsyncBody::default())
-        .unwrap();
-    // client.send(request).await.unwrap();
-
-    // Need to organize this code better
-    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
-    let target_path = temp_dir.path().join("downloadme.tar");
-    let mut target_file = File::create(&target_path).await.unwrap();
-    let extracted = temp_dir.path().join("extracted");
-    std::fs::create_dir(&extracted).unwrap();
-
-    let Ok(mut response) = client.send(request).await else {
-        log::error!("Failed get reponse - TODO fix error handling");
-        return Err(DevContainerErrorV2::UnmappedError);
-    };
-
-    smol::io::copy(response.body_mut(), &mut target_file)
-        .await
-        .unwrap();
-
-    let command_output = Command::new("tar")
-        .arg("-xvf")
-        .arg(&target_path)
-        .arg("-C")
-        .arg(&extracted)
-        .output()
-        .await
-        .unwrap();
-
-    dbg!(&command_output);
-
-    // let Ok(_) = comm
-
-    let extracted_location = &extracted.join(".devcontainer/");
-
-    for entry in WalkDir::new(extracted_location) {
-        let entry = entry.unwrap();
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let relative_path = entry.path().strip_prefix(&extracted).unwrap();
-        let rel_path = RelPath::unix(relative_path).unwrap().into_arc();
-        let content = std::fs::read(entry.path()).unwrap();
-
-        worktree
-            .update(cx, |worktree, cx| {
-                worktree.create_entry(rel_path, false, Some(content), cx)
-            })
-            .unwrap();
-    }
-
-    dbg!(&extracted_location);
-
-    Ok(extracted_location.clone())
 }
 
 #[cfg(test)]

@@ -1,15 +1,12 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use futures::AsyncReadExt;
-use http::Request;
-use http_client::{AsyncBody, HttpClient};
+use fs::Fs;
 use serde::Deserialize;
 use serde_json_lenient::Value;
 
 use crate::{
     DevContainerErrorV2,
     devcontainer_json::{FeatureOptions, MountDefinition},
-    oci::{DockerManifestsResponse, get_deserialized_response},
     safe_id_upper,
 };
 
@@ -23,8 +20,6 @@ pub(crate) struct OciFeatureRef {
     pub registry: String,
     /// Full repository path within the registry, e.g. `devcontainers/features/aws-cli`
     pub path: String,
-    /// Short feature identifier, e.g. `aws-cli`
-    pub id: String,
     /// Version tag, digest, or `latest`
     pub version: String,
 }
@@ -103,8 +98,9 @@ impl FeatureManifest {
         merged
     }
 
-    pub(crate) fn write_feature_env(
+    pub(crate) async fn write_feature_env(
         &self,
+        fs: &Arc<dyn Fs>,
         options: &FeatureOptions,
     ) -> Result<String, DevContainerErrorV2> {
         let merged_env = self.genereate_merged_env(options);
@@ -116,16 +112,16 @@ impl FeatureManifest {
 
         let env_file_content = env_vars.join("\n");
 
-        std::fs::write(
-            self.file_path.join("devcontainer-features.env"),
-            env_file_content.clone(),
+        fs.write(
+            &self.file_path.join("devcontainer-features.env"),
+            env_file_content.as_bytes(),
         )
+        .await
         .map_err(|e| {
             log::error!("error writing devcontainer feature environment: {e}");
             DevContainerErrorV2::UnmappedError
         })?;
 
-        // TODO should probably handle what's returned here in-struct, but we'll take it step by step
         Ok(env_file_content)
     }
 
@@ -193,13 +189,11 @@ pub(crate) fn parse_oci_feature_ref(input: &str) -> Option<OciFeatureRef> {
     }
 
     let registry = parts[0].to_string();
-    let id = parts[parts.len() - 1].to_string();
     let path = parts[1..].join("/");
 
     Some(OciFeatureRef {
         registry,
         path,
-        id,
         version,
     })
 }
