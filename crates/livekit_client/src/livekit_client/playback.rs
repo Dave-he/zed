@@ -139,8 +139,7 @@ impl AudioStack {
         let source = NativeAudioSource::new(
             // n.b. this struct's options are always ignored, noise cancellation is provided by apm.
             AudioSourceOptions::default(),
-            SAMPLE_RATE.get(), // TODO(audio): this was legacy params,
-            // removed for now for simplicity
+            SAMPLE_RATE.get(),
             CHANNEL_COUNT.get().into(),
             10,
         );
