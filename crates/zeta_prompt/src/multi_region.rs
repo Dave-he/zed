@@ -87,7 +87,7 @@ pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
 
         // Non-blank line immediately following blank line(s): split here so
         // the new block starts with this line.
-        if !is_blank && byte_offset > 0 && lines_since_last_marker >= MIN_BLOCK_LINES {
+        if !is_blank && byte_offset > 0 && lines_since_last_marker > MIN_BLOCK_LINES {
             let before = &editable_text[..byte_offset];
             let has_preceding_blank_line = before
                 .strip_suffix('\n')
@@ -100,23 +100,30 @@ pub fn compute_marker_offsets(editable_text: &str) -> Vec<usize> {
                 })
                 .unwrap_or(false);
 
-            if has_preceding_blank_line
-                && byte_offset >= pending_boundary.unwrap_or(last_boundary_line_end)
-            {
-                let remaining_text = &editable_text[byte_offset..];
+            if has_preceding_blank_line {
+                let boundary = if is_control_tail_or_closer_line(line.trim()) {
+                    nudge_hard_cap_boundary_forward(
+                        editable_text,
+                        byte_offset,
+                        byte_offset,
+                        HARD_CAP_BOUNDARY_MAX_FORWARD_LINES,
+                    )
+                    .unwrap_or(byte_offset)
+                } else {
+                    byte_offset
+                };
+
+                let remaining_text = &editable_text[boundary..];
                 let remaining_lines = remaining_text
                     .as_bytes()
                     .iter()
                     .filter(|&&byte| byte == b'\n')
                     .count();
 
-                if remaining_lines >= MIN_BLOCK_LINES {
-                    offsets.push(byte_offset);
-                    let segment = &editable_text
-                        [pending_boundary.unwrap_or(last_boundary_line_end)..byte_offset];
-                    let line_count = segment.as_bytes().iter().filter(|&&b| b == b'\n').count();
-                    lines_since_last_marker = line_count.max(1);
-                    last_boundary_line_end = byte_offset;
+                if remaining_lines >= MIN_BLOCK_LINES && boundary > last_boundary_line_end {
+                    offsets.push(boundary);
+                    lines_since_last_marker = 1;
+                    last_boundary_line_end = boundary;
                     pending_boundary = None;
                 }
             }
@@ -1131,7 +1138,7 @@ fn is_control_tail_or_closer_line(trimmed_line: &str) -> bool {
 
     matches!(
         trimmed_line.trim_end_matches(';'),
-        "break" | "continue" | "return" | "throw"
+        "break" | "continue" | "return" | "throw" | "end"
     )
 }
 
@@ -1153,6 +1160,88 @@ mod tests {
         assert_eq!(offsets[0], 0);
         assert!(offsets.contains(&13), "offsets: {:?}", offsets);
         assert_eq!(*offsets.last().unwrap(), text.len());
+    }
+
+    #[test]
+    fn test_compute_marker_offsets_blank_line_split_overrides_pending_hard_cap_boundary() {
+        let text = "\
+class OCRDataframe(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    df: pl.DataFrame
+
+    def page(self, page_number: int = 0) -> \"OCRDataframe\":
+        # Filter dataframe on specific page
+        df_page = self.df.filter(pl.col(\"page\") == page_number)
+        return OCRDataframe(df=df_page)
+
+    def get_text_cell(
+        self,
+        cell: Cell,
+        margin: int = 0,
+        page_number: Optional[int] = None,
+        min_confidence: int = 50,
+    ) -> Optional[str]:
+        \"\"\"
+        Get text corresponding to cell
+";
+        let offsets = compute_marker_offsets(text);
+
+        let def_start = text
+            .find("    def get_text_cell(")
+            .expect("def line exists");
+        let self_start = text.find("        self,").expect("self line exists");
+
+        assert!(
+            offsets.contains(&def_start),
+            "expected boundary at def line start ({def_start}), got {offsets:?}"
+        );
+        assert!(
+            !offsets.contains(&self_start),
+            "did not expect boundary at self line start ({self_start}), got {offsets:?}"
+        );
+    }
+
+    #[test]
+    fn test_compute_marker_offsets_blank_line_split_skips_closer_line() {
+        let text = "\
+impl Plugin for AhoySchedulePlugin {
+    fn build(&self, app: &mut App) {
+        app.configure_sets(
+            self.schedule,
+            (
+                AhoySystems::MoveCharacters,
+                AhoySystems::ApplyForcesToDynamicRigidBodies,
+            )
+                .chain()
+                .before(PhysicsSystems::First),
+        );
+
+    }
+}
+
+/// System set used by all systems of `bevy_ahoy`.
+#[derive(SystemSet, Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum AhoySystems {
+    MoveCharacters,
+    ApplyForcesToDynamicRigidBodies,
+}
+";
+        let offsets = compute_marker_offsets(text);
+
+        let closer_start = text.find("    }\n").expect("closer line exists");
+        let doc_start = text
+            .find("/// System set used by all systems of `bevy_ahoy`.")
+            .expect("doc line exists");
+
+        assert!(
+            !offsets.contains(&closer_start),
+            "did not expect boundary at closer line start ({closer_start}), got {offsets:?}"
+        );
+        assert!(
+            offsets.contains(&doc_start),
+            "expected boundary at doc line start ({doc_start}), got {offsets:?}"
+        );
     }
 
     #[test]
@@ -1226,6 +1315,86 @@ hhhhhhhhhh = 8;
     fn test_compute_marker_offsets_empty() {
         let offsets = compute_marker_offsets("");
         assert_eq!(offsets, vec![0, 0]);
+    }
+
+    #[test]
+    fn test_compute_marker_offsets_avoid_short_markdown_blocks() {
+        let text = "\
+# Spree Posts
+
+This is a Posts extension for [Spree Commerce](https://spreecommerce.org), built with Ruby on Rails.
+
+## Installation
+
+1. Add this extension to your Gemfile with this line:
+
+    ```ruby
+    bundle add spree_posts
+    ```
+
+2. Run the install generator
+
+    ```ruby
+    bundle exec rails g spree_posts:install
+    ```
+
+3. Restart your server
+
+  If your server was running, restart it so that it can find the assets properly.
+
+## Developing
+
+1. Create a dummy app
+
+    ```bash
+    bundle update
+    bundle exec rake test_app
+    ```
+
+2. Add your new code
+3. Run tests
+
+    ```bash
+    bundle exec rspec
+    ```
+
+When testing your applications integration with this extension you may use it's factories.
+Simply add this require statement to your spec_helper:
+
+```ruby
+require 'spree_posts/factories'
+```
+
+## Releasing a new version
+
+```shell
+bundle exec gem bump -p -t
+bundle exec gem release
+```
+
+For more options please see [gem-release README](https://github.com/svenfuchs/gem-release)
+
+## Contributing
+
+If you'd like to contribute, please take a look at the contributing guide.
+";
+        let offsets = compute_marker_offsets(text);
+
+        assert_eq!(offsets.first().copied(), Some(0), "offsets: {offsets:?}");
+        assert_eq!(
+            offsets.last().copied(),
+            Some(text.len()),
+            "offsets: {offsets:?}"
+        );
+
+        for window in offsets.windows(2) {
+            let block = &text[window[0]..window[1]];
+            let line_count = block.lines().count();
+            assert!(
+                line_count >= MIN_BLOCK_LINES,
+                "block too short: {line_count} lines in block {block:?} with offsets {offsets:?}"
+            );
+        }
     }
 
     #[test]
