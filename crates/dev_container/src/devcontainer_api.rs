@@ -597,25 +597,34 @@ pub(crate) async fn apply_dev_container_template_v2(
     })
     .await?;
 
-    // TODO unwraps here
-    let id: &str = &template.id;
-    let token: &str = &token.token;
-    let blob_digest: &str = &manifest.layers[0].digest;
-    let client = &context.http_client;
-    let temp_dir = tempfile::Builder::new().tempdir().unwrap();
-    let extracted = temp_dir.path().join("extracted");
-    context.fs.create_dir(&extracted).await.unwrap();
+    let layer = &manifest.layers.get(0).ok_or_else(|| {
+        log::error!("Given manifest has no layers to query for blob. Aborting");
+        DevContainerError::DockerNotAvailable
+    })?;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let extract_dir = std::env::temp_dir()
+        .join(&template.id)
+        .join(format!("extracted-{timestamp}"));
+
+    context.fs.create_dir(&extract_dir).await.map_err(|e| {
+        log::error!("Could not create temporary directory");
+        DevContainerError::DevContainerParseFailed // TODO
+    })?;
 
     download_oci_tarball(
-        token,
+        &token.token,
         ghcr_registry(),
         devcontainer_templates_repository(),
-        blob_digest,
+        &layer.digest,
         "application/vnd.oci.image.manifest.v1+json",
-        &extracted,
-        client,
+        &extract_dir,
+        &context.http_client,
         &context.fs,
-        Some(id),
+        Some(&template.id),
     )
     .map_err(|e| {
         log::error!("Error downloading tarball: {:?}", e);
@@ -623,19 +632,28 @@ pub(crate) async fn apply_dev_container_template_v2(
     })
     .await?;
 
-    let downloaded_devcontainer_folder = &extracted.join(".devcontainer/");
+    let downloaded_devcontainer_folder = &extract_dir.join(".devcontainer/");
     let mut project_files = Vec::new();
     for entry in WalkDir::new(downloaded_devcontainer_folder) {
-        let entry = entry.unwrap();
+        let Ok(entry) = entry else {
+            continue;
+        };
         if !entry.file_type().is_file() {
             continue;
         }
-        let relative_path = entry.path().strip_prefix(&extracted).unwrap();
-        let rel_path = RelPath::unix(relative_path).unwrap().into_arc();
-        let content = std::fs::read(entry.path()).unwrap();
+        let relative_path = entry.path().strip_prefix(&extract_dir).map_err(|e| {
+            log::error!("Can't create relative path: {e}");
+            DevContainerError::DockerNotAvailable // TODO
+        })?;
+        let rel_path = RelPath::unix(relative_path)
+            .map_err(|_| DevContainerError::DevContainerParseFailed)? // TODO
+            .into_arc();
+        let content = context.fs.load(entry.path()).await.map_err(|e| {
+            log::error!("Unable to read file: {e}");
+            DevContainerError::DevContainerCliNotAvailable // TODO
+        })?;
 
-        let content_as_string = String::from_utf8(content).unwrap();
-        let mut content = expand_template_options(content_as_string, template_options);
+        let mut content = expand_template_options(content, template_options);
         if let Some("devcontainer.json") = &rel_path.file_name() {
             content = insert_features_into_devcontainer_json(&content, features_selected)
         }
@@ -644,7 +662,10 @@ pub(crate) async fn apply_dev_container_template_v2(
                 worktree.create_entry(rel_path.clone(), false, Some(content.into_bytes()), cx)
             })
             .await
-            .unwrap();
+            .map_err(|e| {
+                log::error!("Unable to create entry in worktree: {e}");
+                DevContainerError::DockerNotAvailable // TODO
+            })?;
         project_files.push(rel_path);
     }
 
