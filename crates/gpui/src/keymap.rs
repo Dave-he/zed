@@ -4,7 +4,7 @@ mod context;
 pub use binding::*;
 pub use context::*;
 
-use crate::{Action, AsKeystroke, Keystroke, is_no_action, is_unbind};
+use crate::{Action, AsKeystroke, Keystroke, Unbind, is_no_action, is_unbind};
 use collections::{HashMap, HashSet};
 use smallvec::SmallVec;
 use std::any::TypeId;
@@ -26,6 +26,15 @@ pub struct Keymap {
 /// Index of a binding within a keymap.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct BindingIndex(usize);
+
+fn binding_is_unbound(disabled_binding: &KeyBinding, binding: &KeyBinding) -> bool {
+    disabled_binding.keystrokes == binding.keystrokes
+        && disabled_binding
+            .action()
+            .as_any()
+            .downcast_ref::<Unbind>()
+            .is_some_and(|unbind| unbind.0.as_ref() == binding.action.name())
+}
 
 impl Keymap {
     /// Create a new keymap with the given bindings.
@@ -112,7 +121,7 @@ impl Keymap {
                             return None;
                         }
                     } else if is_unbind(&*disabled_binding.action)
-                        && disabled_binding.context_predicate == binding.context_predicate
+                        && binding_is_unbound(disabled_binding, binding)
                     {
                         return None;
                     }
@@ -180,7 +189,7 @@ impl Keymap {
 
         let mut bindings: SmallVec<[_; 1]> = SmallVec::new();
         let mut first_binding_index = None;
-        let mut unbound_bindings = Vec::new();
+        let mut unbound_bindings: Vec<&KeyBinding> = Vec::new();
 
         for (_, ix, binding) in matched_bindings {
             if is_no_action(&*binding.action) {
@@ -199,19 +208,13 @@ impl Keymap {
             }
 
             if is_unbind(&*binding.action) {
-                unbound_bindings.push((
-                    binding.keystrokes.clone(),
-                    binding.context_predicate.clone(),
-                ));
+                unbound_bindings.push(binding);
                 continue;
             }
 
             if unbound_bindings
                 .iter()
-                .any(|(keystrokes, context_predicate)| {
-                    *keystrokes == binding.keystrokes
-                        && *context_predicate == binding.context_predicate
-                })
+                .any(|disabled_binding| binding_is_unbound(disabled_binding, binding))
             {
                 continue;
             }
@@ -754,12 +757,15 @@ mod tests {
     }
 
     #[test]
-    fn test_exact_unbind_falls_through_to_other_contexts() {
+    fn test_targeted_unbind_ignores_target_context() {
         let bindings = [
             KeyBinding::new("tab", ActionAlpha {}, Some("Editor")),
             KeyBinding::new("tab", ActionBeta {}, Some("Editor && showing_completions")),
-            KeyBinding::new("tab", ActionGamma {}, Some("Editor && edit_prediction")),
-            KeyBinding::new("tab", Unbind {}, Some("Editor && edit_prediction")),
+            KeyBinding::new(
+                "tab",
+                Unbind("test_only::ActionAlpha".into()),
+                Some("Editor && edit_prediction"),
+            ),
         ];
 
         let mut keymap = Keymap::default();
@@ -771,16 +777,19 @@ mod tests {
         );
 
         assert!(!pending);
-        assert_eq!(result.len(), 2);
+        assert_eq!(result.len(), 1);
         assert!(result[0].action.partial_eq(&ActionBeta {}));
-        assert!(result[1].action.partial_eq(&ActionAlpha {}));
     }
 
     #[test]
-    fn test_bindings_for_action_respects_exact_unbind() {
+    fn test_bindings_for_action_respects_targeted_unbind() {
         let bindings = [
-            KeyBinding::new("tab", ActionAlpha {}, Some("Editor && edit_prediction")),
-            KeyBinding::new("tab", Unbind {}, Some("Editor && edit_prediction")),
+            KeyBinding::new("tab", ActionAlpha {}, Some("Editor")),
+            KeyBinding::new(
+                "tab",
+                Unbind("test_only::ActionAlpha".into()),
+                Some("Editor && edit_prediction"),
+            ),
             KeyBinding::new("tab", ActionBeta {}, Some("Editor && showing_completions")),
         ];
 

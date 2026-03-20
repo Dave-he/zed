@@ -432,27 +432,35 @@ pub fn generate_list_of_all_registered_actions() -> impl Iterator<Item = MacroAc
 
 mod no_action {
     use crate as gpui;
-    use std::any::Any as _;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
 
     actions!(
         zed,
         [
             /// Action with special handling which unbinds the keybinding this is associated with,
             /// if it is the highest precedence match.
-            NoAction,
-            /// Action with special handling which unbinds only later bindings with the exact same
-            /// keystrokes and context predicate, while allowing other bindings to fall through.
-            Unbind
+            NoAction
         ]
     );
 
+    /// Action with special handling which unbinds later bindings for the same keystrokes when they
+    /// dispatch the named action, regardless of that action's context.
+    ///
+    /// In keymap JSON this is written as:
+    ///
+    /// `["zed::Unbind", "editor::NewLine"]`
+    #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, gpui::Action)]
+    #[action(namespace = zed)]
+    pub struct Unbind(pub gpui::SharedString);
+
     /// Returns whether or not this action represents a removed key binding.
     pub fn is_no_action(action: &dyn gpui::Action) -> bool {
-        action.as_any().type_id() == (NoAction {}).type_id()
+        action.as_any().is::<NoAction>()
     }
 
-    /// Returns whether or not this action represents an exact unbind marker.
+    /// Returns whether or not this action represents an unbind marker.
     pub fn is_unbind(action: &dyn gpui::Action) -> bool {
-        action.as_any().type_id() == (Unbind {}).type_id()
+        action.as_any().is::<Unbind>()
     }
 }
