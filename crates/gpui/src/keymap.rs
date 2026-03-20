@@ -27,6 +27,17 @@ pub struct Keymap {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct BindingIndex(usize);
 
+fn disabled_binding_matches_context(disabled_binding: &KeyBinding, binding: &KeyBinding) -> bool {
+    match (
+        &disabled_binding.context_predicate,
+        &binding.context_predicate,
+    ) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(disabled_predicate), Some(predicate)) => disabled_predicate.is_superset(predicate),
+    }
+}
+
 fn binding_is_unbound(disabled_binding: &KeyBinding, binding: &KeyBinding) -> bool {
     disabled_binding.keystrokes == binding.keystrokes
         && disabled_binding
@@ -107,20 +118,11 @@ impl Keymap {
                     }
 
                     if is_no_action(&*disabled_binding.action) {
-                        let disabled_binding_matches = match (
-                            &disabled_binding.context_predicate,
-                            &binding.context_predicate,
-                        ) {
-                            (None, _) => true,
-                            (Some(_), None) => false,
-                            (Some(disabled_predicate), Some(predicate)) => {
-                                disabled_predicate.is_superset(predicate)
-                            }
-                        };
-                        if disabled_binding_matches {
+                        if disabled_binding_matches_context(disabled_binding, binding) {
                             return None;
                         }
                     } else if is_unbind(&*disabled_binding.action)
+                        && disabled_binding_matches_context(disabled_binding, binding)
                         && binding_is_unbound(disabled_binding, binding)
                     {
                         return None;
@@ -782,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bindings_for_action_respects_targeted_unbind() {
+    fn test_bindings_for_action_keeps_binding_for_narrower_targeted_unbind() {
         let bindings = [
             KeyBinding::new("tab", ActionAlpha {}, Some("Editor")),
             KeyBinding::new(
@@ -796,7 +798,7 @@ mod tests {
         let mut keymap = Keymap::default();
         keymap.add_bindings(bindings);
 
-        assert_bindings(&keymap, &ActionAlpha {}, &[]);
+        assert_bindings(&keymap, &ActionAlpha {}, &["tab"]);
         assert_bindings(&keymap, &ActionBeta {}, &["tab"]);
 
         #[track_caller]
@@ -807,6 +809,26 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected, "{:?}", action);
         }
+    }
+
+    #[test]
+    fn test_bindings_for_action_removes_binding_for_broader_targeted_unbind() {
+        let bindings = [
+            KeyBinding::new("tab", ActionAlpha {}, Some("Editor && edit_prediction")),
+            KeyBinding::new(
+                "tab",
+                Unbind("test_only::ActionAlpha".into()),
+                Some("Editor"),
+            ),
+        ];
+
+        let mut keymap = Keymap::default();
+        keymap.add_bindings(bindings);
+
+        assert_eq!(
+            keymap.bindings_for_action(&ActionAlpha {}).collect(),
+            vec![]
+        );
     }
 
     #[test]
