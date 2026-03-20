@@ -1434,18 +1434,27 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
         cx: &mut App,
     ) -> Task<Result<()>> {
         self.0.update(cx, |agent, cx| {
+            let thread = agent.sessions.get(session_id).map(|s| s.thread.clone());
+            if let Some(thread) = thread {
+                agent.save_thread(thread, cx);
+            }
+
             let Some(session) = agent.sessions.remove(session_id) else {
-                return;
+                return Task::ready(Ok(()));
             };
             let project_id = session.project_id;
-            agent.save_thread(session.thread, cx);
+            let pending_save = session.pending_save;
 
             let has_remaining = agent.sessions.values().any(|s| s.project_id == project_id);
             if !has_remaining {
                 agent.projects.remove(&project_id);
             }
-        });
-        Task::ready(Ok(()))
+
+            cx.spawn(async move |_, _| {
+                pending_save.await;
+                Ok(())
+            })
+        })
     }
 
     fn auth_methods(&self) -> &[acp::AuthMethod] {
@@ -2765,7 +2774,9 @@ mod internal_tests {
 
         cx.run_until_parked();
 
-        // Set a draft prompt with rich content blocks before saving.
+        // Set a draft prompt with rich content blocks and scroll position
+        // AFTER run_until_parked, so the only save that captures these
+        // changes is the one performed by close_session itself.
         let draft_blocks = vec![
             acp::ContentBlock::Text(acp::TextContent::new("Check out ")),
             acp::ContentBlock::ResourceLink(acp::ResourceLink::new("b.md", uri.to_string())),
@@ -2780,8 +2791,6 @@ mod internal_tests {
                 offset_in_item: gpui::px(12.5),
             }));
         });
-        thread.update(cx, |_thread, cx| cx.notify());
-        cx.run_until_parked();
 
         // Close the session so it can be reloaded from disk.
         cx.update(|cx| connection.clone().close_session(&session_id, cx))
